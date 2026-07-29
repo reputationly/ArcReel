@@ -17,59 +17,168 @@ permissions:
   packages: write
   security-events: write
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
-
 jobs:
-  build-and-push:
+  prepare:
+    name: Compute version & registries
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      moving_tags: ${{ steps.meta.outputs.moving_tags }}
+      ghcr_image: ${{ steps.meta.outputs.ghcr_image }}
+      acr_image: ${{ steps.meta.outputs.acr_image }}
+      has_acr: ${{ steps.meta.outputs.has_acr }}
+      is_release: ${{ steps.meta.outputs.is_release }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Compute lowercase image name
-        run: echo "IMAGE_NAME_LC=${REPO,,}" >> "$GITHUB_ENV"
+      - id: meta
         env:
-          REPO: ${{ github.repository }}
+          # ACR 相关 secret 未配置时整条 ACR 链路自动跳过，workflow 仍然绿。
+          # 三个都要检查：只配了 registry 而漏了账号/密码时，后面的 login 会拿空凭据去登，
+          # 整条流水线直接失败 —— 那正是这套「未配置就跳过」的设计要避免的。
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          REPO_LC="${GITHUB_REPOSITORY,,}"
+          # 镜像 tag 集合必须与改造前 docker/metadata-action 的产出一致，否则 pin 了旧 tag 的
+          # 用户在新版本发布后直接拉不到：
+          #   - 不可变版本 tag 用**去掉 v 前缀**的 SemVer（metadata-action 的 {{version}} 就是
+          #     这个形态，git tag 是 v1.2.3、镜像 tag 是 1.2.3）；
+          #   - tag 构建另出 latest + major.minor + major；
+          #   - 分支构建另出 :<分支名>（对齐 type=ref,event=branch）；
+          #   - 两种构建都出 sha-<短 sha>（对齐 type=sha,prefix=sha-）。
+          # latest 只在正式发布时移动 —— 否则任意一次 main 推送都会把依赖 :latest 的用户
+          # 从上一个发布版拽到未发布镜像上。
+          # 分支名必须取实际 ref：workflow_dispatch 可以在任意分支上手动触发，写死 main
+          # 会让一次特性分支的试构建把正式的 :main 标签覆盖掉。
+          SHA_TAG="sha-$(git rev-parse --short HEAD)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION="${VERSION#v}"
+            MOVING="latest $SHA_TAG"
+            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              MOVING="$MOVING ${BASH_REMATCH[1]}.${BASH_REMATCH[2]} ${BASH_REMATCH[1]}"
+            fi
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            # Docker tag 合法字符是 [A-Za-z0-9._-]，且首字符须为字母数字或下划线；
+            # feat/xyz 这类带斜杠的分支名要规范化后才能当 tag 用。
+            BRANCH_TAG="$(printf '%s' "$GITHUB_REF_NAME" \
+              | sed 's/[^A-Za-z0-9._-]/-/g; s/^[^A-Za-z0-9_]*//')"
+            [ -n "$BRANCH_TAG" ] || BRANCH_TAG="build"
+            VERSION="${BRANCH_TAG}-$(git rev-parse --short=8 HEAD)"
+            MOVING="$BRANCH_TAG $SHA_TAG"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "moving_tags=$MOVING" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          if [ -n "$ACR_REGISTRY" ] && [ -n "$ACR_USERNAME" ] && [ -n "$ACR_PASSWORD" ]; then
+            echo "has_acr=true" >> "$GITHUB_OUTPUT"
+            echo "acr_image=${ACR_REGISTRY}/reputationly/arcreel" >> "$GITHUB_OUTPUT"
+          else
+            if [ -n "$ACR_REGISTRY$ACR_USERNAME$ACR_PASSWORD" ]; then
+              echo "::warning::ACR secrets 配置不完整(registry/username/password 需三者齐全)，已跳过阿里云镜像仓推送"
+            fi
+            echo "has_acr=false" >> "$GITHUB_OUTPUT"
+            echo "acr_image=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Building $VERSION"
+
+  build:
+    name: Build & push (${{ matrix.arch }})
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 原生 runner 分架构构建，不走 QEMU —— arm64 交叉模拟慢一个量级。
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4.2.0
 
-      - uses: docker/login-action@v4.4.0
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: meta
-        uses: docker/metadata-action@v6.2.0
+      - name: Log in to ACR
+        if: needs.prepare.outputs.has_acr == 'true'
+        uses: docker/login-action@v4.4.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=ref,event=branch
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
-      - uses: docker/setup-qemu-action@v4
+      - name: Compose per-arch tags
+        id: tags
+        env:
+          GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
+          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          {
+            echo "list<<EOF"
+            for TAG in "$VERSION" $MOVING_TAGS; do
+              echo "${GHCR_IMAGE}:${TAG}-${ARCH}"
+              if [ -n "$ACR_IMAGE" ]; then
+                echo "${ACR_IMAGE}:${TAG}-${ARCH}"
+              fi
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Build amd64 image for security scan
+      - name: Build & push single-arch
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
-          load: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:scan-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Output digest
+        run: |
+          echo "### ${{ matrix.arch }} digest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  scan:
+    name: Trivy scan (amd64)
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LC }}:scan-${{ github.sha }}
+          image-ref: ${{ needs.prepare.outputs.ghcr_image }}:${{ needs.prepare.outputs.version }}-amd64
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
@@ -83,18 +192,86 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-image
 
-      - name: Build & push multi-arch image
-        uses: docker/build-push-action@v7
+  manifests:
+    name: Create multi-arch manifests
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.4.0
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
+      - name: Log in to ACR
+        if: needs.prepare.outputs.has_acr == 'true'
+        uses: docker/login-action@v4.4.0
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      # 把两个单架构 tag 合成一个多架构 manifest：客户端 docker pull 时按本机架构自动选。
+      - name: Create & push manifests
+        env:
+          GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
+          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
+        run: |
+          set -euo pipefail
+          for IMAGE in "$GHCR_IMAGE" ${ACR_IMAGE:+"$ACR_IMAGE"}; do
+            for TAG in "$VERSION" $MOVING_TAGS; do
+              docker buildx imagetools create \
+                -t "${IMAGE}:${TAG}" \
+                "${IMAGE}:${VERSION}-amd64" \
+                "${IMAGE}:${VERSION}-arm64"
+              echo "pushed ${IMAGE}:${TAG}"
+            done
+          done
+
+      - name: Output manifest
+        env:
+          GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          echo "### Multi-arch manifest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Create GitHub Release
+    needs: [prepare, manifests]
+    if: needs.prepare.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # ACR 是可选的（secret 未配置时整条链路跳过），发布说明里就不能无条件写它的
+      # 拉取命令 —— 否则会出现 `docker pull :v1.0.0` 这种镜像名为空的废命令。
+      - name: Compose release notes
+        env:
+          GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
+          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          {
+            echo '## Docker 镜像'
+            echo
+            echo '```'
+            echo "docker pull ${GHCR_IMAGE}:${VERSION}"
+            echo '```'
+            if [ -n "$ACR_IMAGE" ]; then
+              echo
+              echo '国内环境走阿里云镜像仓（拉取更快）：'
+              echo
+              echo '```'
+              echo "docker pull ${ACR_IMAGE}:${VERSION}"
+              echo '```'
+            fi
+          } > release-notes.md
+
+      - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
+          body_path: release-notes.md
