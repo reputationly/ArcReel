@@ -66,7 +66,10 @@ class TestRegistry:
         }
 
     def test_new_video_endpoints_have_unset_cap(self):
-        """v2/ark/vidu/dashscope/minimax/kling 不在 endpoint 维度声明上限，由 resolver 调 backend 纯 caps 函数读取。"""
+        """多 model 共享的 endpoint 不在 endpoint 维度声明上限，由 resolver 调 backend 纯 caps 函数读取。
+
+        newapi-video 属于此类：网关背后可能是 Seedance / Wan / 自部署，endpoint 维度给不出准数。
+        """
         for key in (
             "v2-video-generations",
             "ark-seedance",
@@ -74,11 +77,11 @@ class TestRegistry:
             "dashscope-async-video",
             "minimax-video",
             "kling-video",
+            "newapi-video",
         ):
             assert ENDPOINT_REGISTRY[key].video_max_reference_images is None
-        # 既有显式 int 保留，行为零变化
+        # 单一模型语义的 endpoint 保留显式 int（Sora 的 input_reference 恒为单张首帧图）
         assert ENDPOINT_REGISTRY["openai-video"].video_max_reference_images == 1
-        assert ENDPOINT_REGISTRY["newapi-video"].video_max_reference_images == 0
 
     def test_video_caps_declaration_bindings(self):
         """每个 video endpoint 选对了上限来源：None-cap 的绑 caps_fn、显式 int 的不绑。
@@ -94,11 +97,11 @@ class TestRegistry:
             "dashscope-async-video",
             "minimax-video",
             "kling-video",
+            "newapi-video",
         ):
             assert ENDPOINT_REGISTRY[key].video_caps_for_model is not None
         # 显式 int 的 video endpoint 不应再绑 caps 函数
-        for key in ("openai-video", "newapi-video"):
-            assert ENDPOINT_REGISTRY[key].video_caps_for_model is None
+        assert ENDPOINT_REGISTRY["openai-video"].video_caps_for_model is None
 
     def test_dashscope_caps_fn_reads_per_model_limit_without_client(self):
         """dashscope-async-video 的 caps_fn 是纯函数：按 model_id 返回真实参考图上限
@@ -107,6 +110,19 @@ class TestRegistry:
         assert caps_fn is not None
         assert caps_fn("happyhorse-1.0-r2v").max_reference_images == 9
         assert caps_fn("wan2.7-r2v").max_reference_images == 5
+
+    def test_newapi_caps_fn_reads_per_model_limit_without_client(self):
+        """newapi-video 的 caps_fn 是纯函数：Seedance 2.0 多模态参考 max_ref=9 且支持尾帧，
+        1.5 Pro 只支持尾帧，非 Seedance 家族回落保守默认，resolver 据此解析而无需构造 backend / api_key。"""
+        caps_fn = ENDPOINT_REGISTRY["newapi-video"].video_caps_for_model
+        assert caps_fn is not None
+        seedance2 = caps_fn("doubao-seedance-2-0-260128")
+        assert seedance2.max_reference_images == 9
+        assert seedance2.last_frame is True
+        assert caps_fn("doubao-seedance-1-5-pro").max_reference_images == 0
+        assert caps_fn("wan2.2-i2v").max_reference_images == 0
+        # delegate 确实读取并下传 end_image，否则声明尾帧只会让合成层空宣称
+        assert ENDPOINT_REGISTRY["newapi-video"].end_image_capable is True
 
     def test_minimax_caps_fn_reads_per_model_limit_without_client(self):
         """minimax-video 的 caps_fn 是纯函数：S2V-01 单脸参考 max_ref=1，海螺系列走首帧无参考

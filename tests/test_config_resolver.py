@@ -673,7 +673,8 @@ class TestVideoCapabilities:
         assert caps["source"] == "custom"
         assert caps["supported_durations"] == [5, 10]
         assert caps["max_duration"] == 10
-        # newapi-video endpoint 不接受参考图，max=0（来源：EndpointSpec.video_max_reference_images）
+        # my-video-model 不是 Seedance 家族 → backend caps 判定不接受参考图，max=0
+        # （来源：EndpointSpec.video_caps_for_model → NewAPIVideoBackend.video_capabilities_for_model）
         assert caps["max_reference_images"] == 0
 
     async def test_custom_video_openai_endpoint_resolves_max_one(self):
@@ -764,7 +765,7 @@ class TestVideoCapabilities:
             await engine.dispose()
         assert caps["model"] == "default-model"
         assert caps["supported_durations"] == [5, 10]
-        # newapi-video 不接受尾帧覆盖；已禁用 model 的 last_frame=True 覆盖不应残留
+        # default-model 不是 Seedance 家族 → 系统判定无尾帧；已禁用 model 的 last_frame=True 覆盖不应残留
         assert caps["last_frame"] is False
 
 

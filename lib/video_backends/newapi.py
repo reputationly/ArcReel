@@ -48,6 +48,17 @@ _LARGE_IMAGE_WARN_BYTES = 4 * 1024 * 1024
 # 视频标准尺寸对齐 8 的倍数（1920x1080 / 1080x1920 等；1080 非 16 的倍数），主流视频模型通用。
 _VIDEO_ROUND_TO = 8
 
+# Seedance 2.0 多模态参考图上限（上游 1~9 张）。
+_MAX_REFERENCE_IMAGES = 9
+
+
+def _is_seedance(model: str) -> bool:
+    return "seedance" in model
+
+
+def _is_seedance_2(model: str) -> bool:
+    return "seedance-2" in model or "seedance2" in model or "seedance-2-0" in model
+
 
 def _resolve_size(resolution: str | None, aspect_ratio: str) -> tuple[int, int]:
     """比例优先、清晰度其次：短边来自 resolution（档位 / 自定义 / None 兜底 720P），
@@ -89,10 +100,16 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
     def video_capabilities_for_model(model: str) -> VideoCapabilities:
         """按 model_id 纯计算 caps —— 不构造 SDK client（无需 api_key）。
 
-        中转端点不接受参考图；当前全系模型能力一致，不按 model_id 分支。
-        instance property 委托至此，保持 backend 为单一真相源。
+        中转端点本身只是转发，能力取决于网关背后挂的模型。Seedance 家族支持首尾帧，
+        2.0 另外支持多模态参考图（1~9 张，与首帧模式互斥）；其余模型保持保守默认，
+        避免请求发出去才被上游拒。instance property 委托至此，保持 backend 为单一真相源。
         """
-        return VideoCapabilities(max_reference_images=0)
+        name = (model or "").lower()
+        if not _is_seedance(name):
+            return VideoCapabilities(max_reference_images=0)
+        if _is_seedance_2(name):
+            return VideoCapabilities(last_frame=True, max_reference_images=_MAX_REFERENCE_IMAGES)
+        return VideoCapabilities(last_frame=True, max_reference_images=0)
 
     @property
     def video_capabilities(self) -> VideoCapabilities:
@@ -100,36 +117,42 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
 
     async def generate(self, request: VideoGenerationRequest) -> VideoGenerationResult:
         width, height = _resolve_size(request.resolution, request.aspect_ratio)
+        # width/height 是老中转实现的键;上游 new-api 的统一任务契约只读 size(WxH)与
+        # metadata(引擎原生参数从这里透传),两套都发,谁认哪个各取所需,互不干扰。
         payload: dict = {
             "model": self._model,
             "prompt": request.prompt,
             "width": width,
             "height": height,
+            "size": f"{width}x{height}",
             "duration": request.duration_seconds,
             "n": 1,
         }
+        metadata: dict = {}
         if request.seed is not None:
             payload["seed"] = request.seed
-        if request.start_image:
-            start_path = Path(request.start_image)
-            if start_path.exists():
-                size_bytes = start_path.stat().st_size
-                if size_bytes > _LARGE_IMAGE_WARN_BYTES:
-                    logger.warning(
-                        "NewAPI start_image 较大 (%.1fMB)，Base64 编码后可能触发服务端请求体限制",
-                        size_bytes / 1024 / 1024,
-                    )
-                # 延迟导入避免 image_backends ↔ video_backends 循环依赖
-                from lib.image_backends.base import image_to_base64_data_uri
+            metadata["seed"] = request.seed
 
-                payload["image"] = image_to_base64_data_uri(start_path)
+        images, image_role = self._collect_images(request)
+        if images:
+            # 图片入参在 NewAPI 生态里有两套并存的写法，都发，谁认哪套各取所需：
+            #   1. 顶层 images[] + metadata.image_role —— 上游 new-api 的统一任务契约
+            #      （TaskSubmitReq.Images，role 按位置推断，image_role 显式钉住语义）；
+            #   2. image + metadata.image_tail / metadata.image_urls —— 中转站事实标准，
+            #      入参只有 image 与 metadata 黑盒，尾帧沿用可灵的 image_tail、参考数组沿用
+            #      即梦的 image_urls（见 docs/research/arcreel-video-api-protocol-research.md
+            #      §2.2 与参数对齐表 NewAPI 列）。
+            # 只发第 1 套的话，中转站部署会看不到尾帧/参考图 —— 能力宣称支持、生成却不受约束。
+            payload["images"] = images
+            if image_role is None:
+                payload["image"] = images[0]
+                if len(images) > 1:
+                    metadata["image_tail"] = images[1]
             else:
-                logger.warning("start_image 文件不存在，已忽略: %s", start_path)
-        if request.reference_images:
-            logger.warning(
-                "NewAPIVideoBackend 不支持多张参考图（reference_images=%d），已忽略",
-                len(request.reference_images),
-            )
+                metadata["image_role"] = image_role
+                metadata["image_urls"] = images
+        if metadata:
+            payload["metadata"] = metadata
 
         logger.info("NewAPI 视频生成开始: model=%s, duration=%s", self._model, request.duration_seconds)
         logger.info("调用 %s 视频 SDK payload=%s", self.name, format_kwargs_for_log(payload))
@@ -139,6 +162,57 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
             logger.info("NewAPI 任务创建: task_id=%s", provider_task_id)
             await self._persist_provider_job_id(request, provider_task_id, provider=PROVIDER_NEWAPI)
             return await self._poll_and_build(client, provider_task_id, request, is_resume=False)
+
+    def _collect_images(self, request: VideoGenerationRequest) -> tuple[list[str], str | None]:
+        """把图片输入编码成 data-uri 列表，并给出显式 role（None = 按首帧/首尾帧语义）。
+
+        只做上游协议的**结构**约束：三种图片模式互斥（单图首帧 / 首尾帧 / 多张参考图），
+        尾帧必须与首帧成对。同时给首帧和参考图时以首帧模式为准并告警——两者一起发上游
+        会整单拒绝。
+
+        **能力门控不在这里做**：生效能力是「系统按模型判定 ⊕ 用户覆盖」的合成结果
+        （见 lib/custom_provider/capabilities.py），由 executor 在调用前裁剪。backend 若
+        再按模型名二次否决，用户在自定义供应商上显式开启的尾帧 / 参考图就会被静默丢弃，
+        界面宣称支持而实际生成无该约束。其余 backend（v2 / ark 等）同样不做这层否决。
+        """
+        references = list(request.reference_images or [])
+
+        if references and not request.start_image:
+            return [uri for path in references if (uri := self._encode_image(path, "reference_image"))], (
+                "reference_image"
+            )
+
+        if references and request.start_image:
+            logger.warning("首帧与参考图模式互斥，已忽略 %d 张参考图", len(references))
+
+        frames: list[str] = []
+        if request.start_image and (uri := self._encode_image(request.start_image, "start_image")):
+            frames.append(uri)
+            # 尾帧必须与首帧成对出现，单独给尾帧上游无法解释。
+            if request.end_image and (uri := self._encode_image(request.end_image, "end_image")):
+                frames.append(uri)
+        elif request.end_image:
+            logger.warning("提供了尾帧但缺少首帧，已忽略: %s", request.end_image)
+        return frames, None
+
+    @staticmethod
+    def _encode_image(path: Path | str, label: str) -> str | None:
+        """读盘编码成 data-uri；文件不存在返回 None（与原行为一致：告警后跳过）。"""
+        image_path = Path(path)
+        if not image_path.exists():
+            logger.warning("%s 文件不存在，已忽略: %s", label, image_path)
+            return None
+        size_bytes = image_path.stat().st_size
+        if size_bytes > _LARGE_IMAGE_WARN_BYTES:
+            logger.warning(
+                "NewAPI %s 较大 (%.1fMB)，Base64 编码后可能触发服务端请求体限制",
+                label,
+                size_bytes / 1024 / 1024,
+            )
+        # 延迟导入避免 image_backends ↔ video_backends 循环依赖
+        from lib.image_backends.base import image_to_base64_data_uri
+
+        return image_to_base64_data_uri(image_path)
 
     async def resume_video(self, job_id: str, request: VideoGenerationRequest) -> VideoGenerationResult:
         """接续已 submit 的 NewAPI task：仅 poll + 下载。"""
@@ -231,7 +305,7 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
             headers=self._headers(),
         )
         resp.raise_for_status()
-        return resp.json()
+        return _normalize_task_state(resp.json())
 
     @staticmethod
     @with_retry_async(
@@ -256,3 +330,67 @@ def _extract_failure(state: dict) -> str | None:
         return None
     err = (state.get("error") or {}).get("message") or "unknown"
     return f"NewAPI 视频生成失败: {err}"
+
+
+# 查询回包的状态串 → canonical(小写后查表)。NewAPI 系有两套词表:
+#   - 文档化的视频任务响应:queued / in_progress / completed / failed;
+#   - 通用任务模型透出的内部态:NOT_START / SUBMITTED / QUEUED / IN_PROGRESS / SUCCESS / FAILURE。
+# 未收录的串一律当"仍在跑"继续轮询,不误判成终态。
+_STATUS_ALIASES: dict[str, str] = {
+    "completed": "completed",
+    "succeeded": "completed",
+    "success": "completed",
+    "failed": "failed",
+    "failure": "failed",
+    "error": "failed",
+    "expired": "expired",
+}
+
+
+def _normalize_task_state(payload: object) -> dict:
+    """把查询回包统一成 {status, url, metadata, error} —— 上层只认这一种形状。
+
+    NewAPI 的 ``GET /v1/video/generations/{id}`` 有两种回包:
+
+    1. 扁平的视频任务响应(文档形态、部分中转实现)::
+
+           {"task_id": ..., "status": "completed", "url": ..., "metadata": {...}}
+
+    2. 通用任务信封(上游 new-api 现行实现,relay/relay_task.go)::
+
+           {"code": "success", "data": {"task_id": ..., "status": "SUCCESS",
+                                        "result_url": ..., "fail_reason": ...}}
+
+    只认第 1 种会永远等不到终态——信封里没有顶层 status,轮询会一直跑到超时。
+    """
+    if not isinstance(payload, dict):
+        return {"status": "", "url": "", "metadata": {}, "error": None}
+
+    inner = payload
+    if "data" in payload and isinstance(payload.get("data"), dict):
+        inner = payload["data"]
+
+    raw_status = str(inner.get("status") or "").strip().lower()
+    status = _STATUS_ALIASES.get(raw_status, raw_status)
+
+    metadata = inner.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    url = ""
+    for candidate in (inner.get("url"), metadata.get("url"), inner.get("result_url")):
+        if isinstance(candidate, str) and candidate.strip():
+            url = candidate.strip()
+            break
+
+    # error 归一成 {"message": ...},_extract_failure 只按这一种形状取。
+    error: dict | None = None
+    raw_error = inner.get("error")
+    if isinstance(raw_error, dict):
+        error = raw_error
+    elif isinstance(raw_error, str) and raw_error.strip():
+        error = {"message": raw_error.strip()}
+    elif isinstance(inner.get("fail_reason"), str) and inner["fail_reason"].strip():
+        error = {"message": inner["fail_reason"].strip()}
+
+    return {"status": status, "url": url, "metadata": metadata, "error": error}

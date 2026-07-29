@@ -678,3 +678,292 @@ class TestNewAPIVideoBackend:
                 )
             assert "expired" in str(ei.value).lower()
             assert not isinstance(ei.value, ResumeExpiredError), "generate 路径不应抛 ResumeExpiredError"
+
+
+class TestNewAPITaskEnvelope:
+    """上游 new-api 现行实现把任务包在 {"code","data"} 信封里，状态还是大写内部态。
+
+    只认扁平形态的话，轮询永远等不到终态，会一路跑到 max_wait 超时。
+    """
+
+    def test_normalize_flat_shape(self):
+        from lib.video_backends.newapi import _normalize_task_state
+
+        state = _normalize_task_state(
+            {"task_id": "t", "status": "completed", "url": "https://cdn/a.mp4", "metadata": {"duration": 5}},
+        )
+        assert state["status"] == "completed"
+        assert state["url"] == "https://cdn/a.mp4"
+        assert state["metadata"] == {"duration": 5}
+
+    def test_normalize_task_envelope(self):
+        from lib.video_backends.newapi import _normalize_task_state
+
+        state = _normalize_task_state(
+            {
+                "code": "success",
+                "data": {"task_id": "t", "status": "SUCCESS", "result_url": "https://obs/a.mp4", "fail_reason": ""},
+            },
+        )
+        assert state["status"] == "completed"
+        assert state["url"] == "https://obs/a.mp4"
+        assert state["error"] is None
+
+    def test_normalize_envelope_failure_reason(self):
+        from lib.video_backends.newapi import _normalize_task_state
+
+        state = _normalize_task_state(
+            {"code": "success", "data": {"status": "FAILURE", "fail_reason": "上游拒绝"}},
+        )
+        assert state["status"] == "failed"
+        assert state["error"] == {"message": "上游拒绝"}
+
+    def test_normalize_openai_metadata_url(self):
+        from lib.video_backends.newapi import _normalize_task_state
+
+        state = _normalize_task_state({"id": "t", "status": "completed", "metadata": {"url": "https://obs/b.mp4"}})
+        assert state["url"] == "https://obs/b.mp4"
+
+    def test_unknown_status_is_not_terminal(self):
+        from lib.video_backends.newapi import _normalize_task_state
+
+        # IN_PROGRESS / QUEUED / 没见过的串都要继续轮询，不能当成终态。
+        for raw in ("IN_PROGRESS", "QUEUED", "NOT_START", "weird"):
+            state = _normalize_task_state({"status": raw})
+            assert state["status"] not in ("completed", "failed", "expired")
+
+    async def test_generate_completes_through_envelope(self, tmp_path: Path):
+        create_resp = _make_response(200, {"task_id": "task-env", "status": "queued"})
+        running = _make_response(200, {"code": "success", "data": {"task_id": "task-env", "status": "IN_PROGRESS"}})
+        done = _make_response(
+            200,
+            {
+                "code": "success",
+                "data": {"task_id": "task-env", "status": "SUCCESS", "result_url": "https://obs/out.mp4"},
+            },
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=create_resp)
+        mock_client.get = AsyncMock(side_effect=[running, done])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        fake_download = AsyncMock(side_effect=_fake_download_factory(b"mp4"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("lib.video_backends.newapi._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.newapi.download_video", fake_download),
+        ):
+            from lib.video_backends.newapi import NewAPIVideoBackend
+
+            backend = NewAPIVideoBackend(api_key="k", base_url="https://x/v1", model="wan2.2-i2v")
+            result = await backend.generate(
+                VideoGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "out.mp4",
+                    aspect_ratio="16:9",
+                    resolution="720p",
+                    duration_seconds=5,
+                    seed=7,
+                ),
+            )
+
+        assert result.task_id == "task-env"
+        assert fake_download.call_args.args[0] == "https://obs/out.mp4"
+
+        # 统一契约:new-api 的 TaskSubmitReq 只读 size 与 metadata，width/height/顶层 seed 会被丢掉。
+        body = mock_client.post.call_args.kwargs["json"]
+        assert body["size"] == "1280x720"
+        assert body["metadata"] == {"seed": 7}
+
+
+class TestNewAPIImageModes:
+    """上游三种图片模式互斥：单图首帧 / 首尾帧 / 多张参考图。"""
+
+    def test_capabilities_by_model(self):
+        from lib.video_backends.newapi import NewAPIVideoBackend
+
+        seedance2 = NewAPIVideoBackend.video_capabilities_for_model("doubao-seedance-2-0-260128")
+        assert seedance2.last_frame is True
+        assert seedance2.max_reference_images == 9
+
+        seedance15 = NewAPIVideoBackend.video_capabilities_for_model("doubao-seedance-1-5-pro")
+        assert seedance15.last_frame is True
+        assert seedance15.max_reference_images == 0
+
+        # 非 Seedance 家族保持保守默认，不臆测网关背后的能力。
+        other = NewAPIVideoBackend.video_capabilities_for_model("wan2.2-i2v")
+        assert other.max_reference_images == 0
+
+    def _backend(self, model: str):
+        from lib.video_backends.newapi import NewAPIVideoBackend
+
+        return NewAPIVideoBackend(api_key="k", base_url="https://x/v1", model=model)
+
+    def _png(self, tmp_path: Path, name: str) -> Path:
+        p = tmp_path / name
+        p.write_bytes(b"\x89PNG\r\nfake")
+        return p
+
+    def test_first_and_last_frame(self, tmp_path: Path):
+        backend = self._backend("doubao-seedance-1-5-pro")
+        request = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            start_image=self._png(tmp_path, "a.png"),
+            end_image=self._png(tmp_path, "b.png"),
+        )
+        images, role = backend._collect_images(request)
+        assert len(images) == 2
+        assert role is None  # 按位置推断首帧/尾帧
+
+    def test_reference_images_carry_explicit_role(self, tmp_path: Path):
+        backend = self._backend("doubao-seedance-2-0-260128")
+        request = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            reference_images=[self._png(tmp_path, "r1.png"), self._png(tmp_path, "r2.png")],
+        )
+        images, role = backend._collect_images(request)
+        assert len(images) == 2
+        # 两张图不带 role 会被网关误判成首尾帧，必须显式钉住。
+        assert role == "reference_image"
+
+    def test_backend_does_not_veto_capabilities(self, tmp_path: Path):
+        """能力门控在上层（系统判定 ⊕ 用户覆盖），backend 不按模型名二次否决。
+
+        自定义供应商允许把 last_frame / reference_images 覆盖为 True；backend 若再按
+        模型名默认能力过滤，用户显式开启的尾帧与参考图会被静默丢弃。
+        """
+        backend = self._backend("wan2.2-i2v")  # 系统默认判定：无参考图、无尾帧
+
+        refs_only = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            reference_images=[self._png(tmp_path, "r1.png")],
+        )
+        images, role = backend._collect_images(refs_only)
+        assert len(images) == 1
+        assert role == "reference_image"
+
+        with_end = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            start_image=self._png(tmp_path, "a.png"),
+            end_image=self._png(tmp_path, "b.png"),
+        )
+        frames, role = backend._collect_images(with_end)
+        assert len(frames) == 2
+        assert role is None
+
+    def test_start_image_wins_over_references(self, tmp_path: Path):
+        backend = self._backend("doubao-seedance-2-0-260128")
+        request = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            start_image=self._png(tmp_path, "a.png"),
+            reference_images=[self._png(tmp_path, "r1.png")],
+        )
+        images, role = backend._collect_images(request)
+        assert len(images) == 1
+        assert role is None
+
+    def test_end_image_without_start_is_ignored(self, tmp_path: Path):
+        backend = self._backend("doubao-seedance-2-0-260128")
+        request = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            end_image=self._png(tmp_path, "b.png"),
+        )
+        assert backend._collect_images(request) == ([], None)
+
+    async def test_payload_carries_images_and_role(self, tmp_path: Path):
+        create_resp = _make_response(200, {"task_id": "t-ref", "status": "queued"})
+        done = _make_response(
+            200,
+            {"code": "success", "data": {"task_id": "t-ref", "status": "SUCCESS", "result_url": "https://obs/o.mp4"}},
+        )
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=create_resp)
+        mock_client.get = AsyncMock(return_value=done)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("lib.video_backends.newapi._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.newapi.download_video", AsyncMock(side_effect=_fake_download_factory(b"m"))),
+        ):
+            from lib.video_backends.newapi import NewAPIVideoBackend
+
+            backend = NewAPIVideoBackend(api_key="k", base_url="https://x/v1", model="doubao-seedance-2-0-260128")
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.mp4",
+                    aspect_ratio="16:9",
+                    duration_seconds=5,
+                    reference_images=[self._png(tmp_path, "r1.png")],
+                ),
+            )
+
+        body = mock_client.post.call_args.kwargs["json"]
+        assert len(body["images"]) == 1
+        assert body["images"][0].startswith("data:image/")
+        assert body["metadata"]["image_role"] == "reference_image"
+        # 中转站只认 metadata 黑盒里的参考数组（即梦语义），两套都要发。
+        assert body["metadata"]["image_urls"] == body["images"]
+        # 参考图模式不发老中转的单图键，避免上游把它当首帧。
+        assert "image" not in body
+
+    async def test_payload_carries_tail_frame_for_relay_stations(self, tmp_path: Path):
+        """尾帧同样要发中转站认的 metadata.image_tail（可灵语义），只发 images[1] 会被忽略。"""
+        create_resp = _make_response(200, {"task_id": "t-fl", "status": "queued"})
+        done = _make_response(
+            200,
+            {"code": "success", "data": {"task_id": "t-fl", "status": "SUCCESS", "result_url": "https://obs/o.mp4"}},
+        )
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=create_resp)
+        mock_client.get = AsyncMock(return_value=done)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("lib.video_backends.newapi._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.newapi.download_video", AsyncMock(side_effect=_fake_download_factory(b"m"))),
+        ):
+            from lib.video_backends.newapi import NewAPIVideoBackend
+
+            backend = NewAPIVideoBackend(api_key="k", base_url="https://x/v1", model="doubao-seedance-1-5-pro")
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.mp4",
+                    aspect_ratio="16:9",
+                    duration_seconds=5,
+                    start_image=self._png(tmp_path, "a.png"),
+                    end_image=self._png(tmp_path, "b.png"),
+                ),
+            )
+
+        body = mock_client.post.call_args.kwargs["json"]
+        assert len(body["images"]) == 2
+        assert body["image"] == body["images"][0]
+        assert body["metadata"]["image_tail"] == body["images"][1]
+        assert "image_role" not in body["metadata"]

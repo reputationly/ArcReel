@@ -313,7 +313,10 @@ ENDPOINT_REGISTRY: dict[str, EndpointSpec] = {
         request_method="POST",
         request_path_template="/v1/video/generations",
         build_backend=_build_newapi_video,
-        video_max_reference_images=0,
+        # 网关背后挂什么模型由 NewAPI 决定（Seedance / Wan / 自部署都可能），endpoint 维度
+        # 给不出准数 → 按 model 读 backend caps。delegate 已按模型家族区分首尾帧与参考图。
+        video_caps_for_model=NewAPIVideoBackend.video_capabilities_for_model,
+        end_image_capable=True,
     ),
     "v2-video-generations": EndpointSpec(
         key="v2-video-generations",

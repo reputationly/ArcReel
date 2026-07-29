@@ -41,9 +41,23 @@ class TestSystemCapabilities:
         assert caps == VideoCapabilities(first_frame=True, last_frame=False, max_reference_images=1)
 
     @pytest.mark.unit
-    def test_endpoint_declaring_zero_cap_yields_no_reference_images(self):
-        caps = system_video_capabilities(endpoint="newapi-video", model_id="whatever")
-        assert caps.max_reference_images == 0
+    def test_newapi_endpoint_delegates_to_backend_caps(self):
+        """newapi-video 背后挂什么模型由网关决定，能力按 model 读 backend 声明。
+
+        endpoint 维度写死上限的话，Seedance 2.0 的参考图 / 尾帧会在合成层被裁成 0 张、
+        尾帧覆盖也会被丢弃 —— backend 里声明了也不生效。
+        """
+        unknown = system_video_capabilities(endpoint="newapi-video", model_id="whatever")
+        assert unknown.max_reference_images == 0
+        assert unknown.last_frame is False
+
+        seedance2 = system_video_capabilities(endpoint="newapi-video", model_id="doubao-seedance-2-0-260128")
+        assert seedance2.max_reference_images == 9
+        assert seedance2.last_frame is True
+
+        seedance15 = system_video_capabilities(endpoint="newapi-video", model_id="doubao-seedance-1-5-pro")
+        assert seedance15.max_reference_images == 0
+        assert seedance15.last_frame is True
 
     @pytest.mark.unit
     def test_endpoint_with_caps_fn_delegates_to_backend_declaration(self):
