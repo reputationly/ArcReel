@@ -17,6 +17,10 @@ permissions:
   packages: write
   security-events: write
 
+env:
+  # 只有仓库路径段能放这儿；registry 域名是 secret，各 job 用 secrets.ACR_REGISTRY 现场拼。
+  ACR_REPO_PATH: reputationly/arcreel
+
 jobs:
   prepare:
     name: Compute version & registries
@@ -25,7 +29,6 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       moving_tags: ${{ steps.meta.outputs.moving_tags }}
       ghcr_image: ${{ steps.meta.outputs.ghcr_image }}
-      acr_image: ${{ steps.meta.outputs.acr_image }}
       has_acr: ${{ steps.meta.outputs.has_acr }}
       is_release: ${{ steps.meta.outputs.is_release }}
     steps:
@@ -74,15 +77,18 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "moving_tags=$MOVING" >> "$GITHUB_OUTPUT"
           echo "ghcr_image=ghcr.io/${REPO_LC}" >> "$GITHUB_OUTPUT"
+          # 这里只输出「有没有 ACR」这个布尔，不输出拼好的镜像名。ACR_REGISTRY 是 secret，
+          # 一旦拼进 job output，GitHub 会以「可能泄露 secret」为由把该 output 整个丢弃
+          # (##[warning]Skip output '...' since it may contain secret)，下游 job 拿到空串，
+          # 于是 ACR 登录照做、却一个 tag 都没推 —— 配置齐全反而静默不推，还全绿。
+          # 镜像名改由各 job 用 secrets.ACR_REGISTRY 现场拼（同 new-api 的写法）。
           if [ -n "$ACR_REGISTRY" ] && [ -n "$ACR_USERNAME" ] && [ -n "$ACR_PASSWORD" ]; then
             echo "has_acr=true" >> "$GITHUB_OUTPUT"
-            echo "acr_image=${ACR_REGISTRY}/reputationly/arcreel" >> "$GITHUB_OUTPUT"
           else
             if [ -n "$ACR_REGISTRY$ACR_USERNAME$ACR_PASSWORD" ]; then
               echo "::warning::ACR secrets 配置不完整(registry/username/password 需三者齐全)，已跳过阿里云镜像仓推送"
             fi
             echo "has_acr=false" >> "$GITHUB_OUTPUT"
-            echo "acr_image=" >> "$GITHUB_OUTPUT"
           fi
           echo "Building $VERSION"
 
@@ -125,11 +131,16 @@ jobs:
         id: tags
         env:
           GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
-          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          HAS_ACR: ${{ needs.prepare.outputs.has_acr }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
           ARCH: ${{ matrix.arch }}
         run: |
+          ACR_IMAGE=""
+          if [ "$HAS_ACR" = "true" ]; then
+            ACR_IMAGE="${ACR_REGISTRY}/${ACR_REPO_PATH}"
+          fi
           {
             echo "list<<EOF"
             for TAG in "$VERSION" $MOVING_TAGS; do
@@ -216,11 +227,16 @@ jobs:
       - name: Create & push manifests
         env:
           GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
-          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          HAS_ACR: ${{ needs.prepare.outputs.has_acr }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MOVING_TAGS: ${{ needs.prepare.outputs.moving_tags }}
         run: |
           set -euo pipefail
+          ACR_IMAGE=""
+          if [ "$HAS_ACR" = "true" ]; then
+            ACR_IMAGE="${ACR_REGISTRY}/${ACR_REPO_PATH}"
+          fi
           for IMAGE in "$GHCR_IMAGE" ${ACR_IMAGE:+"$ACR_IMAGE"}; do
             for TAG in "$VERSION" $MOVING_TAGS; do
               docker buildx imagetools create \
@@ -252,9 +268,14 @@ jobs:
       - name: Compose release notes
         env:
           GHCR_IMAGE: ${{ needs.prepare.outputs.ghcr_image }}
-          ACR_IMAGE: ${{ needs.prepare.outputs.acr_image }}
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          HAS_ACR: ${{ needs.prepare.outputs.has_acr }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          ACR_IMAGE=""
+          if [ "$HAS_ACR" = "true" ]; then
+            ACR_IMAGE="${ACR_REGISTRY}/${ACR_REPO_PATH}"
+          fi
           {
             echo '## Docker 镜像'
             echo
