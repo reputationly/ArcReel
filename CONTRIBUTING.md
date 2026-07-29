@@ -153,15 +153,20 @@ chore: 构建/工具变更
 
 ## 发版流程
 
-版本号与 changelog 由 [release-please](https://github.com/googleapis/release-please) 自动维护（配置见 `.release-please-config.json`，workflow 见 `.github/workflows/release-please.yml`）。**开发者无需手动 bump 版本号**——只需写合规的 conventional commits。
+发版由**手工打 tag** 触发（与同组的 new-api 一致）：
 
-### 工作流程
+```bash
+git tag v0.24.0
+git push origin v0.24.0
+```
 
-1. PR 按 conventional commits 规范 squash merge 到 `main`
-2. release-please 扫描自上次 release 以来的 commit，自动开/更新一个标题形如 `chore(main): release X.Y.Z` 的 Release PR，里面包含下次版本号 bump + 更新的 `CHANGELOG.md`
-3. 合并该 Release PR 即自动打 `vX.Y.Z` tag 并发布 GitHub Release
+推 tag 会触发 `.github/workflows/docker.yml`，它一次做完三件事：多架构镜像构建、推送 GHCR（配了 ACR secrets 则一并推阿里云镜像仓）、创建 GitHub Release。
+
+> 早先版本号与 changelog 由 [release-please](https://github.com/googleapis/release-please) 自动维护。它依赖一个 GitHub App 凭据来代替人推 tag——GitHub 规定内置 `GITHUB_TOKEN` 做的操作不触发其他 workflow，机器人打的 tag 因此叫不醒 Docker workflow。该 App 未随仓库迁移过来，workflow 已移除。`.release-please-config.json` 保留作为下表 commit type 分类的依据；要恢复自动化，补齐 App 凭据并还原 workflow 即可。
 
 ### commit type → 版本步进
+
+版本号现在由打 tag 的人决定，下表是选版本号时的参照，也是 changelog 的分类依据：
 
 | commit type | 版本步进 | changelog |
 |-------------|---------|-----------|
@@ -171,9 +176,7 @@ chore: 构建/工具变更
 | `perf` / `refactor` / `docs` / `revert` | 不步进 | 显示（⚡ / ♻️ / 📚 / ↩️） |
 | `chore` / `ci` / `build` / `test` / `style` | 不步进 | 隐藏 |
 
-> release-please 默认只有 `feat` 和 `fix`（以及破坏性变更）触发版本 bump。把 `perf`/`refactor`/`docs`/`revert` 配成 `hidden: false` 只影响 changelog 呈现，不会使它们触发 patch bump。如果一轮迭代只有这几类 commit，不会产出 Release PR，直到下一个 `fix`/`feat` commit 到来。
-
-`pyproject.toml` 和 `frontend/package.json` 的 `version` 字段由 release-please 自动维护（见 `pyproject.toml` 的 `# managed by release-please` 注释），**开发者视为只读**。`uv.lock` 同样由 release-please workflow 在 Release PR 分支上自动 `uv lock` 同步。实际版本状态以 git tag + `.release-please-manifest.json` 为准。
+`pyproject.toml` 和 `frontend/package.json` 的 `version` 字段此前由 release-please 维护（见 `pyproject.toml` 的 `# managed by release-please` 注释），现在需要随 tag 手工同步，改完记得 `uv lock`。实际版本状态以 git tag 为准。
 
 ### commit 示例
 
@@ -190,7 +193,7 @@ feat(grid): 支持 grid_12 布局
 将宫格系统扩展到 12 宫格，适用于长篇剧集的批量预览。
 ```
 
-**本仓库不使用破坏性变更标记。** 前后端同仓一体发布，后端 API 不做版本化对外承诺——自带前端随版本同步演进，外部集成（OpenClaw 等）经 `/skill.md` 运行时拉取最新契约、不依赖版本号，删改 `public/skill.md.template` 引用的端点时同步更新该模板。接口删改按 `fix`/`refactor` 正常分类，不加 `!` 后缀、不写 `BREAKING CHANGE:` footer。误标合并后的纠正方式：编辑该 PR 正文追加 `BEGIN_COMMIT_OVERRIDE`/`END_COMMIT_OVERRIDE` 块，release-please 按 override 重算 changelog 与版本号（需 squash 合并，本仓库满足）；workflow 仅在 main push 时运行，编辑后需等下一次 main push 或手动重跑 release-please workflow 才生效。0.x 阶段的 `bump-minor-pre-major` 仅把误标的版本跃迁限制为 minor，不修正 changelog。
+**本仓库不使用破坏性变更标记。** 前后端同仓一体发布，后端 API 不做版本化对外承诺——自带前端随版本同步演进，外部集成（OpenClaw 等）经 `/skill.md` 运行时拉取最新契约、不依赖版本号，删改 `public/skill.md.template` 引用的端点时同步更新该模板。接口删改按 `fix`/`refactor` 正常分类，不加 `!` 后缀、不写 `BREAKING CHANGE:` footer。误标不再需要专门纠正：版本号由打 tag 的人决定，changelog 由 GitHub Release 生成，改 Release 说明即可。
 
 以下语法说明仅用于识别误标。**破坏性变更**有两种等价写法：
 
@@ -205,7 +208,6 @@ BREAKING CHANGE: /api/v1/api-keys 的返回结构改为 { items: [...] }，
 旧客户端需要适配。
 ```
 
-两种写法 release-please 都会：
-- 将版本号 bump 为 major；当前版本 <1.0.0 时受 `bump-minor-pre-major` 配置约束，只 bump minor
-- 在 changelog 顶部插入独立的 **⚠️ BREAKING CHANGES** 区块，把每条破坏性变更的描述汇总展示
+两种写法在 changelog 里的呈现相同：
+- 顶部插入独立的 **⚠️ BREAKING CHANGES** 区块，把每条破坏性变更的描述汇总展示
 - 在对应 type section（如 `✨ 新功能`）下保留该 commit 的常规条目
