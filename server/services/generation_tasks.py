@@ -188,6 +188,32 @@ def assert_duration_supported(duration: int | float | str, supported_durations: 
         )
 
 
+def assert_reference_images_survived_clamp(
+    *,
+    original_count: int,
+    remaining_count: int,
+    provider: str,
+    model: str | None,
+) -> None:
+    """执行层能力守卫：参考直出路径下参考图不得被能力裁剪清空。
+
+    与 :func:`assert_duration_supported` 对称，坐在同一处（provider 解析之后、下发之前）。
+    参考直出（``generation_mode=reference_video``）的本体就是资产参考图——模型据此锁定
+    角色/产品外观。模型声明 ``max_reference_images=0`` 时裁剪会把参考清空，此时继续下发
+    有两种坏结局，且后者更坏：
+
+    - i2v 模型收到无图请求，被远端以 400 拒绝（至少还会报错）；
+    - t2v 模型照单全收，能出片，但画面与登记资产毫无关系——参考直出静默降级成文生视频，
+      要到看成片才发现产品长得不对，且看不出为什么。
+
+    故在此本地拦下。原本就没有参考图（``original_count == 0``）不属于本守卫范围：那是
+    调用方自己的选择，不是能力裁剪造成的，放行以免误伤无参考的合法调用。
+    """
+    if original_count <= 0 or remaining_count > 0:
+        return
+    raise VideoCapabilityError("video_reference_mode_unsupported", model=model or provider)
+
+
 def _collect_sheet_references(
     project: dict,
     project_path: Path,

@@ -35,6 +35,7 @@ from lib.thumbnail import extract_video_thumbnail
 from lib.version_manager import VersionManager
 from server.services.generation_context import VideoLaneRequest, resolve_generation_context
 from server.services.generation_tasks import (
+    assert_reference_images_survived_clamp,
     collect_product_references_for_names,
     get_project_manager,
 )
@@ -494,6 +495,7 @@ async def execute_reference_video_task(
 
     # 5. Provider 特判：裁 refs + 取时长档位。ad 的参考裁剪走专用口径（产品 sheet
     #    跨产品稳定前置存活），时长取档与通用路径共用。
+    original_ref_count = len(ad_entries) if is_ad else len(source_refs)
     base_duration = unit_script_duration(unit, ad_shots)
     if is_ad:
         ad_entries, clamp_warnings = _clamp_ad_reference_entries(
@@ -521,6 +523,20 @@ async def execute_reference_video_task(
             registry_provider_id=registry_provider_id,
             resolution=resolution,
         )
+
+    # 参考图能力守卫：模型 max_reference_images=0 时上面的裁剪会把参考清空，而参考图正是
+    # 参考直出的本体。裁空后继续下发，i2v 模型被远端 400、t2v 模型则静默降级成文生视频
+    # （能出片但画面与登记资产无关，更难发现）。
+    #
+    # 这道守卫与 lib.video_frame_slots.gate_video_request 不重复：后者判 `if reference_images`，
+    # 只在请求真的带着参考图时才校验能力；而此处裁剪发生在下发之前，把违约状态先抹掉了——
+    # 到 gate 时列表已空，检查直接跳过。裁空这件事只能在裁剪现场拦。
+    assert_reference_images_survived_clamp(
+        original_count=original_ref_count,
+        remaining_count=len(constrained_refs),
+        provider=provider_name,
+        model=model_name,
+    )
 
     # 把实际申请的秒数写回 task payload：resume 路径（server.services.resume_executor）
     # 读 payload["duration_seconds"] 重建申请参数，回退顺序是 payload > project.default_duration

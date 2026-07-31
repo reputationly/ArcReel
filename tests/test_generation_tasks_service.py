@@ -8,7 +8,10 @@ from lib.video_backends.base import VideoCapabilities, VideoCapabilityError
 from lib.video_frame_slots import gate_video_request
 from server.services import generation_tasks
 from server.services.generation_context import GenerationContext, ImageLaneResult, VideoLaneResult
-from server.services.generation_tasks import assert_duration_supported
+from server.services.generation_tasks import (
+    assert_duration_supported,
+    assert_reference_images_survived_clamp,
+)
 
 
 class TestAssertDurationSupported:
@@ -43,6 +46,34 @@ class TestAssertDurationSupported:
         with pytest.raises(VideoCapabilityError) as exc:
             assert_duration_supported("abc", [4, 6, 8])
         assert exc.value.code == "video_duration_invalid"
+
+
+class TestAssertReferenceImagesSurvivedClamp:
+    def test_surviving_references_pass(self):
+        assert_reference_images_survived_clamp(
+            original_count=3, remaining_count=1, provider="newapi", model="seedance-2.0"
+        )  # no raise
+
+    def test_clamped_to_empty_rejected(self):
+        # max_reference_images=0 的模型会把参考裁空。继续下发有两种坏结局：i2v 被远端
+        # 400；t2v 更糟——能出片但画面与登记资产无关（静默降级成文生视频）。故本地拦下。
+        with pytest.raises(VideoCapabilityError) as exc:
+            assert_reference_images_survived_clamp(
+                original_count=2, remaining_count=0, provider="newapi", model="wan2.2-i2v"
+            )
+        assert exc.value.code == "video_reference_mode_unsupported"
+        assert exc.value.params["model"] == "wan2.2-i2v"
+
+    def test_originally_empty_passes(self):
+        # 本就没有参考图不是裁剪造成的，是调用方自己的选择，放行以免误伤。
+        assert_reference_images_survived_clamp(
+            original_count=0, remaining_count=0, provider="newapi", model="wan2.2-i2v"
+        )  # no raise
+
+    def test_falls_back_to_provider_when_model_missing(self):
+        with pytest.raises(VideoCapabilityError) as exc:
+            assert_reference_images_survived_clamp(original_count=1, remaining_count=0, provider="newapi", model=None)
+        assert exc.value.params["model"] == "newapi"
 
 
 class TestCollectSheetReferences:

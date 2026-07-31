@@ -243,6 +243,7 @@ MESSAGES = {
     "video_reference_images_required": "模型 {model} 需要至少一张参考图；请提供参考图",
     "video_reference_images_unreadable": "模型 {model} 有参考图缺失或无法读取，已中止生成：{names}；请检查参考图路径",
     "video_reference_images_unsupported": "模型 {model} 不支持多图主体参考；请移除参考图，或换一个支持参考生视频的模型",
+    "video_reference_mode_unsupported": "模型 {model} 不支持参考直出（只接受首帧图），参考图已被全部裁掉，无法据此生成；请把项目的分镜生成模式改为「图生视频」，或换一个支持多图参考的视频模型",
     "video_reference_images_exceeded": "模型 {model} 最多支持 {limit} 张参考图，收到 {count} 张；请减少参考图数量",
     "video_reference_images_with_frames_unsupported": "模型 {model} 的参考图不能与首帧/尾帧叠加使用；请二选一",
     "video_start_image_unreadable": "模型 {model} 的首帧图无法读取，已中止生成：{name}；请检查首帧图路径",

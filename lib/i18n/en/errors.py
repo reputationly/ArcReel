@@ -254,6 +254,7 @@ MESSAGES = {
     "video_reference_images_required": "Model {model} requires at least one reference image; please provide reference images",
     "video_reference_images_unreadable": "Model {model} has reference images that are missing or unreadable; generation aborted: {names}; check the reference image paths",
     "video_reference_images_unsupported": "Model {model} does not support multi-subject reference images; remove the reference images or switch to a model that supports reference-to-video",
+    "video_reference_mode_unsupported": "Model {model} does not support reference-to-video (it only accepts a start frame), so every reference image was dropped and nothing is left to generate from; switch the project's storyboard mode to image-to-video, or pick a video model that supports multi-image references",
     "video_reference_images_exceeded": "Model {model} supports at most {limit} reference images but received {count}; reduce the number of reference images",
     "video_reference_images_with_frames_unsupported": "Model {model} cannot combine reference images with a first/last frame; use one or the other",
     "video_start_image_unreadable": "The first-frame image for model {model} is unreadable; generation aborted: {name}; check the first-frame image path",
