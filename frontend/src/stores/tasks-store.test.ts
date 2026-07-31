@@ -45,15 +45,15 @@ function task(overrides: Partial<TaskItem> & { task_id: string }): TaskItem {
 // 标记，单条标记的测试取固定值即可。
 const TASK_ID_SEP = "\u0001";
 
-/** 在途标记：请求已发出、后端 task_id 未知。 */
+/** 在途标记：请求已发出、后端 task_id 未知。createdAt 缺省取当下，即「未超时」。 */
 function pendingKey(
   resourceKind: string,
   resourceId: string,
   pendingTaskType: string,
-  opts: { projectName?: string; seq?: number } = {},
+  opts: { projectName?: string; seq?: number; createdAt?: number } = {},
 ): string {
-  const { projectName = "proj", seq = 1 } = opts;
-  return `${projectName}\0${resourceKind}\0${resourceId}\0${pendingTaskType}\0${seq}\0`;
+  const { projectName = "proj", seq = 1, createdAt = Date.now() } = opts;
+  return `${projectName}\0${resourceKind}\0${resourceId}\0${pendingTaskType}\0${seq}\0${createdAt}\0`;
 }
 
 /** 已兑现标记：等待这些 task_id 的真实行落库。 */
@@ -62,7 +62,7 @@ function settledKey(
   resourceId: string,
   pendingTaskType: string,
   taskIds: string[],
-  opts: { projectName?: string; seq?: number } = {},
+  opts: { projectName?: string; seq?: number; createdAt?: number } = {},
 ): string {
   return pendingKey(resourceKind, resourceId, pendingTaskType, opts) + taskIds.join(TASK_ID_SEP);
 }
@@ -70,17 +70,17 @@ function settledKey(
 function pendingScriptFileKey(
   taskType: string,
   scriptFile: string,
-  opts: { projectName?: string; seq?: number } = {},
+  opts: { projectName?: string; seq?: number; createdAt?: number } = {},
 ): string {
-  const { projectName = "proj", seq = 1 } = opts;
-  return `${projectName}\0${taskType}\0${scriptFile}\0${seq}\0`;
+  const { projectName = "proj", seq = 1, createdAt = Date.now() } = opts;
+  return `${projectName}\0${taskType}\0${scriptFile}\0${seq}\0${createdAt}\0`;
 }
 
 function settledScriptFileKey(
   taskType: string,
   scriptFile: string,
   taskIds: string[],
-  opts: { projectName?: string; seq?: number } = {},
+  opts: { projectName?: string; seq?: number; createdAt?: number } = {},
 ): string {
   return pendingScriptFileKey(taskType, scriptFile, opts) + taskIds.join(TASK_ID_SEP);
 }
@@ -444,6 +444,46 @@ describe("useTasksStore.setTasks prunes stale optimistic markers", () => {
 
   it("keeps a marker whose task row has not landed yet", () => {
     const key = settledKey("character", "A", "image_edit", ["edit-A"]);
+    useTasksStore.setState({ tasks: [], optimisticActive: new Set([key]) });
+
+    useTasksStore.getState().setTasks([
+      task({ task_id: "unrelated", resource_id: "B", task_type: "character" }),
+    ]);
+
+    expect([...useTasksStore.getState().optimisticActive]).toEqual([key]);
+  });
+
+  it("drops an in-flight marker once it outlives the TTL", () => {
+    // 调用方失联（await 期间组件卸载 / 异常在 handle 之外被吞）时 settle/rollback 都不会
+    // 发生，标记本身又没有让位依据，此前会永久钉死该资源上的编辑控件——只有刷新页面能解。
+    const key = pendingKey("character", "A", "image_edit", {
+      createdAt: Date.now() - 61_000,
+    });
+    useTasksStore.setState({ tasks: [], optimisticActive: new Set([key]) });
+
+    useTasksStore.getState().setTasks([]);
+
+    expect([...useTasksStore.getState().optimisticActive]).toEqual([]);
+  });
+
+  it("keeps an in-flight marker that is still within the TTL", () => {
+    // TTL 只兜底失联，不能缩短正常在途窗口：慢网关下的入队往返仍须占住资源。
+    const key = pendingKey("character", "A", "image_edit", {
+      createdAt: Date.now() - 5_000,
+    });
+    useTasksStore.setState({ tasks: [], optimisticActive: new Set([key]) });
+
+    useTasksStore.getState().setTasks([]);
+
+    expect([...useTasksStore.getState().optimisticActive]).toEqual([key]);
+  });
+
+  it("does not apply the TTL to settled markers", () => {
+    // 已兑现标记的让位判据是「等待的 task_id 全部落库」，与年龄无关：任务可能排队很久，
+    // 按年龄丢弃会在它真正跑起来之前就把资源判为空闲。
+    const key = settledKey("character", "A", "image_edit", ["edit-A"], {
+      createdAt: Date.now() - 600_000,
+    });
     useTasksStore.setState({ tasks: [], optimisticActive: new Set([key]) });
 
     useTasksStore.getState().setTasks([

@@ -132,15 +132,36 @@ function markTaskIds(key: string): string[] {
   return encoded ? encoded.split(TASK_ID_SEP) : [];
 }
 
+/**
+ * 在途标记的最长存活时间。超过即视为「调用方再也不会 settle/rollback 了」，主动让位。
+ *
+ * 在途标记本身没有让位依据（见 keepMark），正常靠调用方 settle/rollback 收尾。但收尾
+ * 不是必然发生的：入队 await 期间组件卸载、异常在 handle 之外被吞、路由跳走，都会让
+ * handle 失联，标记就永久留在内存里，把该资源上的编辑/重生成控件钉死为禁用，只有刷新
+ * 页面能解。TTL 取足够宽松的值——入队请求往返通常在秒级，60s 不会误伤慢网关下的正常在途。
+ */
+const PENDING_MARK_TTL_MS = 60_000;
+
+/** 取标记 key 的创建时间戳（倒数第二段）；解析不出返回 null（不施加 TTL，宁可保守）。 */
+function markCreatedAt(key: string): number | null {
+  const raw = key.split("\0").at(-2);
+  const value = raw ? Number(raw) : Number.NaN;
+  return Number.isFinite(value) ? value : null;
+}
+
+// 两种 key 的字段布局统一以「…\0seq\0createdAt\0taskIds」收尾：markTaskIds 取末段、
+// markCreatedAt 取倒数第二段、withTaskIds 按最后一个 \0 切分，三者都只认相对位置，
+// 故前缀字段数不同不影响解析；各 selector 也只解构前几段，同样不受影响。
 function optimisticKey(
   projectName: string,
   resourceKind: ResourceKind,
   resourceId: string,
   pendingTaskType: string,
   seq: number,
+  createdAt: number,
   taskIds: readonly string[],
 ): string {
-  return `${projectName}\0${resourceKind}\0${resourceId}\0${pendingTaskType}\0${seq}\0${encodeTaskIds(taskIds)}`;
+  return `${projectName}\0${resourceKind}\0${resourceId}\0${pendingTaskType}\0${seq}\0${createdAt}\0${encodeTaskIds(taskIds)}`;
 }
 
 function optimisticScriptFileKey(
@@ -148,9 +169,10 @@ function optimisticScriptFileKey(
   taskType: string,
   scriptFile: string,
   seq: number,
+  createdAt: number,
   taskIds: readonly string[],
 ): string {
-  return `${projectName}\0${taskType}\0${stripScriptsPrefix(scriptFile)}\0${seq}\0${encodeTaskIds(taskIds)}`;
+  return `${projectName}\0${taskType}\0${stripScriptsPrefix(scriptFile)}\0${seq}\0${createdAt}\0${encodeTaskIds(taskIds)}`;
 }
 
 /** 把 key 末段的 taskIds 换成 `taskIds`，其余字段原样保留。 */
@@ -184,10 +206,21 @@ function keepMark(key: string, landed: ReadonlySet<string>): string | null {
 // 按当前 tasks 修剪乐观占用标记（不新增标记，仅扣除已落库的 task_id 并清理已让位者）。
 // 除兑现时机的顺带清理外，也要在每次 setTasks（轮询写回）时执行——真实任务行是经轮询
 // 进入 store 的，标记只能在那一刻发现自己的行已落库。
-function pruneSupersededOptimistic(tasks: TaskItem[], marks: ReadonlySet<string>): Set<string> {
+function pruneSupersededOptimistic(
+  tasks: TaskItem[],
+  marks: ReadonlySet<string>,
+  now: number,
+): Set<string> {
   const landed = landedTaskIds(tasks);
   const next = new Set<string>();
   for (const key of marks) {
+    // TTL 只施加于在途标记，且只在此处（action 侧）施加——selector 必须保持纯函数，
+    // 在里面读时钟会让同一份 state 算出不同结果。轮询持续调用本函数，超时标记会在
+    // 下一轮写回时消失，selector 自然不再看到它。
+    if (markTaskIds(key).length === 0) {
+      const createdAt = markCreatedAt(key);
+      if (createdAt !== null && now - createdAt > PENDING_MARK_TTL_MS) continue;
+    }
     const kept = keepMark(key, landed);
     if (kept !== null) next.add(kept);
   }
@@ -282,7 +315,7 @@ export const useTasksStore = create<TasksState>((set, get) => {
     const pendingKey = keyOf([]);
     set((s) => {
       // 顺带清理已让位的旧标记，避免 Set 在会话周期内无界增长。
-      const next = pruneSupersededOptimistic(s.tasks, s[field]);
+      const next = pruneSupersededOptimistic(s.tasks, s[field], Date.now());
       next.add(pendingKey);
       return { [field]: next };
     });
@@ -346,21 +379,37 @@ export const useTasksStore = create<TasksState>((set, get) => {
     setTasks: (tasks) =>
       set((s) => ({
         tasks,
-        optimisticActive: pruneSupersededOptimistic(tasks, s.optimisticActive),
-        optimisticActiveScriptFile: pruneSupersededOptimistic(tasks, s.optimisticActiveScriptFile),
+        optimisticActive: pruneSupersededOptimistic(tasks, s.optimisticActive, Date.now()),
+        optimisticActiveScriptFile: pruneSupersededOptimistic(
+          tasks,
+          s.optimisticActiveScriptFile,
+          Date.now(),
+        ),
       })),
     setStats: (stats) => set({ stats }),
     setConnected: (connected) => set({ connected }),
     beginOptimisticActive: (projectName, resourceKind, resourceId, pendingTaskType) => {
+      // seq 与 createdAt 都在 keyOf 之外算一次：settle 时要按同一前缀重建 key，
+      // 每次调用重新取值会让 settle 生成的 key 与 pendingKey 对不上。
       const seq = ++optimisticSeq;
+      const createdAt = Date.now();
       return beginMark("optimisticActive", (taskIds) =>
-        optimisticKey(projectName, resourceKind, resourceId, pendingTaskType, seq, taskIds),
+        optimisticKey(
+          projectName,
+          resourceKind,
+          resourceId,
+          pendingTaskType,
+          seq,
+          createdAt,
+          taskIds,
+        ),
       );
     },
     beginOptimisticActiveForScriptFile: (projectName, taskType, scriptFile) => {
       const seq = ++optimisticSeq;
+      const createdAt = Date.now();
       return beginMark("optimisticActiveScriptFile", (taskIds) =>
-        optimisticScriptFileKey(projectName, taskType, scriptFile, seq, taskIds),
+        optimisticScriptFileKey(projectName, taskType, scriptFile, seq, createdAt, taskIds),
       );
     },
   };

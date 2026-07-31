@@ -704,6 +704,17 @@ export function TaskHud({ anchorRef }: { anchorRef: RefObject<HTMLElement | null
             value={stats.failed}
             color={STATUS_COLORS.failed}
           />
+          {/* cancelling 必须可见：它是占用态（与后端 dedupe 的 ACTIVE_TASK_STATUSES 对齐，
+              worker 仍可能在写资源文件），会让资源上的编辑/重生成控件保持禁用。而按既有设计
+              它不计入「进行中」徽章，于是一条卡在 cancelling 的任务在四格计数里完全隐形——
+              用户看到的是"队列全空、按钮却点不动"，占用源无处可查。 */}
+          {stats.cancelling > 0 && (
+            <StatPill
+              label={t("cancelling_label")}
+              value={stats.cancelling}
+              color={STATUS_COLORS.cancelling}
+            />
+          )}
           {stats.cancelled > 0 && (
             <StatPill
               label={t("cancelled_label")}
