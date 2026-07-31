@@ -64,6 +64,11 @@ COPY public/ public/
 # 复制前端构建产物
 COPY --from=frontend-builder /build/frontend/dist/ frontend/dist/
 
+# 上面那次 sync 带 --no-install-project（那时代码还没 COPY 进来），这里代码齐了再装项目本身。
+# 装成 editable（uv 对项目的默认行为），运行期 lib/server 的 __file__ 仍指向 /app，
+# 依赖 __file__ 推算仓库根的代码（如 profile_manifest）不受影响。
+RUN uv sync --no-dev --frozen
+
 # 创建运行时目录
 RUN mkdir -p projects vertex_keys
 
@@ -75,4 +80,8 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:1241/health || exit 1
 
 # 启动命令
-CMD ["uv", "run", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "1241"]
+# --no-sync 是关键：不加的话 uv run 每次启动都重新解析依赖，且默认带上 dev 组，于是生产
+# 容器每次重启都现下 basedpyright / ruff / nodejs-wheel 等约 80MB（启动多花 ~30s），还把
+# 类型检查器装进生产环境；更要命的是它需要外网，无出网的部署环境会直接起不来。
+# 依赖与项目都已在构建期装好，运行期直接用现成的 venv。
+CMD ["uv", "run", "--no-sync", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "1241"]
