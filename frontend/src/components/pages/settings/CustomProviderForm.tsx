@@ -20,6 +20,7 @@ import {
   urlPreviewFor,
   toggleDefaultReducer,
   mergeDiscoveredModels,
+  withCapabilityOverride,
   withLastFrameOverride,
   capabilityFieldsFor,
   type DiscoveryFormat,
@@ -273,6 +274,67 @@ function DurationsInputRow({
         </p>
       ) : (
         <p className="text-[11px] text-text-4">{t("supported_durations_help")}</p>
+      )}
+    </div>
+  );
+}
+
+function MaxReferenceImagesRow({
+  override,
+  systemValue,
+  onChange,
+}: {
+  override: number | undefined;
+  systemValue: number | null;
+  onChange: (next: number | undefined) => void;
+}) {
+  const { t } = useTranslation("dashboard");
+  const [text, setText] = useState(override === undefined ? "" : String(override));
+  const [invalid, setInvalid] = useState(false);
+
+  // 空串 = 该维度跟随系统判定（键从稀疏字典移除），与 last_frame 的三态语义一致；
+  // 显式填 0 与留空不同——前者是「我确认它不支持参考图」，后者是「按系统判定来」。
+  const handleChange = (next: string) => {
+    setText(next);
+    const trimmed = next.trim();
+    if (!trimmed) {
+      setInvalid(false);
+      onChange(undefined);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      setInvalid(true);
+      return;
+    }
+    setInvalid(false);
+    onChange(parsed);
+  };
+
+  return (
+    <div className="mt-2 flex flex-col gap-1 pl-6">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-3 whitespace-nowrap">
+          {t("max_reference_images_label")}
+        </span>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={text}
+          onChange={(e) => handleChange(e.target.value)}
+          placeholder={
+            systemValue === null
+              ? t("max_reference_images_placeholder")
+              : t("max_reference_images_placeholder_with_system", { count: systemValue })
+          }
+          aria-label={t("max_reference_images_label")}
+          className={`${COMPACT_INPUT_CLS} flex-1`}
+        />
+      </div>
+      {invalid ? (
+        <p className="text-[11px] text-warm-bright">{t("max_reference_images_invalid")}</p>
+      ) : (
+        <p className="text-[11px] text-text-4">{t("max_reference_images_help")}</p>
       )}
     </div>
   );
@@ -825,7 +887,7 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
                       />
                     )}
 
-                    {/* 能力覆盖行（仅 video endpoint；首批只开放 last_frame） */}
+                    {/* 能力覆盖行（仅 video endpoint；开放维度见后端 CAPABILITY_OVERRIDE_ALLOWLIST） */}
                     {media === "video" && (
                       <CapabilityOverrideRow
                         override={m.capability_overrides?.last_frame}
@@ -834,6 +896,22 @@ export function CustomProviderForm({ existing, onSaved, onCancel }: CustomProvid
                         onChange={(next) =>
                           updateModel(m.key, {
                             capability_overrides: withLastFrameOverride(m.capability_overrides, next),
+                          })
+                        }
+                      />
+                    )}
+
+                    {media === "video" && (
+                      <MaxReferenceImagesRow
+                        override={m.capability_overrides?.max_reference_images}
+                        systemValue={m.system_capabilities?.max_reference_images ?? null}
+                        onChange={(next) =>
+                          updateModel(m.key, {
+                            capability_overrides: withCapabilityOverride(
+                              m.capability_overrides,
+                              "max_reference_images",
+                              next,
+                            ),
                           })
                         }
                       />

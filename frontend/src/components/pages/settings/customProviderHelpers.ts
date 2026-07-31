@@ -175,17 +175,26 @@ export interface CapabilitySnapshotRow {
 /** 稀疏覆盖字典的唯一写入点：next === undefined 表示回到「跟随判定」，此时把该键从字典移除
  *  而不是写 false——键缺席与显式 false 在后端是两种语义（跟随判定 vs 强制关）。移除后字典为空
  *  则整体收敛回 null，避免把 {} 存进去让「有无覆盖」多出一种等价表示。 */
+export function withCapabilityOverride<K extends keyof CapabilityOverrides>(
+  prev: CapabilityOverrides | null,
+  key: K,
+  next: CapabilityOverrides[K] | undefined,
+): CapabilityOverrides | null {
+  const merged: CapabilityOverrides = { ...(prev ?? {}) };
+  if (next === undefined) {
+    delete merged[key];
+  } else {
+    merged[key] = next;
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+/** {@link withCapabilityOverride} 的 last_frame 特化，保留原调用点的读法。 */
 export function withLastFrameOverride(
   prev: CapabilityOverrides | null,
   next: boolean | undefined,
 ): CapabilityOverrides | null {
-  const merged: CapabilityOverrides = { ...(prev ?? {}) };
-  if (next === undefined) {
-    delete merged.last_frame;
-  } else {
-    merged.last_frame = next;
-  }
-  return Object.keys(merged).length > 0 ? merged : null;
+  return withCapabilityOverride(prev, "last_frame", next);
 }
 
 /** 覆盖与系统判定都绑定 (endpoint, model_id) 组合：任一维度偏离加载时的快照就一并作废，

@@ -63,7 +63,9 @@ MaxWorkers = Annotated[int | None, Field(default=None, ge=1)]
 
 # 开放给用户覆盖的能力维度。DB 列与合成函数对 VideoCapabilities 全字段通用，写入侧在此收窄：
 # 未列入的维度即便是合法字段名也不落库，扩容只需往这里加键名，无需 DB 迁移或改合成语义。
-CAPABILITY_OVERRIDE_ALLOWLIST = frozenset({"last_frame", "reference_audio_mode", "max_reference_audio_count"})
+CAPABILITY_OVERRIDE_ALLOWLIST = frozenset(
+    {"last_frame", "max_reference_images", "reference_audio_mode", "max_reference_audio_count"}
+)
 
 # 白名单必须是 VideoCapabilities 字段名的子集：值类型校验直接按字段名取期望类型，键名写错
 # 要在导入期炸掉，而不是等到一次真实写入才 KeyError 成 500。

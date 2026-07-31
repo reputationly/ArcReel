@@ -138,6 +138,21 @@ class TestSynthesize:
         assert caps.max_reference_images == 3
 
     @pytest.mark.unit
+    def test_user_override_lifts_conservative_system_limit(self):
+        """系统判定为 0 张的模型，用户覆盖后按覆盖值生效。
+
+        中转网关背后挂什么模型判定不出来，NewAPI 路径下非 Seedance 一律保守判 0；
+        覆盖若不生效，参考生视频对这些模型就是永久不可用且无从纠正。
+        """
+        system = system_video_capabilities(endpoint="newapi-video", model_id="wan2.2-i2v")
+        assert system.max_reference_images == 0
+
+        caps = synthesize_video_capabilities(
+            endpoint="newapi-video", model_id="wan2.2-i2v", overrides={"max_reference_images": 4}
+        )
+        assert caps.max_reference_images == 4
+
+    @pytest.mark.unit
     def test_system_capabilities_not_mutated_across_calls(self):
         """合成返回新实例，不得就地改写系统判定（caps_fn 可能返回共享对象）。"""
         first = synthesize_video_capabilities(
