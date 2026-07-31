@@ -293,6 +293,72 @@ async def test_generate_narration_audio_enqueues_missing_segments(fake_ctx: Tool
     assert "audio/segment_E1S01.wav" in text
 
 
+def _ad_audio_script() -> dict[str, Any]:
+    return {
+        "content_mode": "ad",
+        "episode": 1,
+        "shots": [
+            {
+                "shot_id": "E1S01",
+                "voiceover_text": "一只安静的杯子。",
+                "generated_assets": {},
+            },
+            {
+                "shot_id": "E1S02",
+                "voiceover_text": "拿起，水温沿杯身浮现。",
+                "generated_assets": {"narration_audio": "audio/segment_E1S02.wav"},
+            },
+        ],
+    }
+
+
+async def test_generate_narration_audio_supports_ad_scripts(fake_ctx: ToolContext, monkeypatch) -> None:
+    """ad 模式按 voiceover_text 配音。
+
+    ad 剧本的口播是一等字段，剧本生成时还按语速约束了字数；此前工具只认 narration 的
+    novel_text，导致广告项目做完视频后无法配音，而剪映导出侧早已支持音频轨。
+    """
+    from server.agent_runtime.sdk_tools import enqueue_narration_audio as mod
+
+    fake_ctx.pm.script_payload = _ad_audio_script()  # type: ignore[attr-defined]
+    captured: list[Any] = []
+
+    async def fake_batch(*, project_name, specs, on_success=None, on_failure=None):
+        from lib.generation_queue_client import BatchTaskResult
+
+        captured.extend(specs)
+        return [
+            BatchTaskResult(
+                resource_id=s.resource_id,
+                task_id="t1",
+                status="succeeded",
+                result={"file_path": f"audio/segment_{s.resource_id}.wav"},
+            )
+            for s in specs
+        ], []
+
+    monkeypatch.setattr(mod, "batch_enqueue_and_wait", fake_batch)
+    tool_obj = mod.generate_narration_audio_tool(fake_ctx)
+    out = await _call(tool_obj, {"script": "episode_1.json"})
+
+    assert out.get("is_error") is not True, out
+    # 只为缺 narration_audio 的镜头入队，文案取 voiceover_text
+    assert [s.resource_id for s in captured] == ["E1S01"]
+    assert captured[0].payload["prompt"] == "一只安静的杯子。"
+
+
+async def test_generate_narration_audio_rejects_drama(fake_ctx: ToolContext) -> None:
+    # drama 的口播是场景级有序 utterances，没有可直接朗读的整段文案。
+    from server.agent_runtime.sdk_tools import enqueue_narration_audio as mod
+
+    fake_ctx.pm.script_payload = {"content_mode": "drama", "scenes": []}  # type: ignore[attr-defined]
+    tool_obj = mod.generate_narration_audio_tool(fake_ctx)
+    out = await _call(tool_obj, {"script": "episode_1.json"})
+
+    assert out.get("is_error") is True
+    assert "没有可直接朗读的整段口播文案" in out["content"][0]["text"]
+
+
 async def test_generate_narration_audio_selects_item_with_corrupt_generated_assets(
     fake_ctx: ToolContext, monkeypatch
 ) -> None:

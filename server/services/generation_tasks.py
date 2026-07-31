@@ -32,7 +32,7 @@ from lib.prompt_utils import (
     video_prompt_to_yaml,
 )
 from lib.resource_paths import END_FRAME_RESOURCE_TYPE, resource_relative_path
-from lib.script_models import get_generated_assets
+from lib.script_models import get_generated_assets, voiceover_text_field
 from lib.script_skeleton import SKELETON_ENTITY_TYPES, SKELETON_ITEM_NOUNS, resolve_script_kind
 from lib.storyboard_sequence import (
     build_previous_storyboard_reference,
@@ -710,28 +710,36 @@ async def execute_tts_task(
     user_id: str = DEFAULT_USER_ID,
     task_id: str | None = None,
 ) -> dict[str, Any]:
-    """为说书模式单个 segment 合成旁白音频（同步 TTS，无续传）。
+    """为单个 segment / 镜头合成旁白音频（同步 TTS，无续传）。
 
-    文本来源：payload.text 显式优先；否则从脚本 segment 的 novel_text 读取。文本为空 /
-    segment 找不到 / 脚本未生成一律显式 raise，绝不把空串送给 backend 合成。
+    文本来源：payload.text 显式优先；否则按剧本的 content_mode 从对应字段读取
+    （narration 取 novel_text、ad 取 voiceover_text，见 ``VOICEOVER_TEXT_FIELDS``）。
+    字段名不写死在这里——字幕导出读的是同一份文案，两处各写一份会漂移成「字幕有词、
+    配音没声」。文本为空 / segment 找不到 / 模式不支持整段朗读一律显式 raise，绝不把
+    空串送给 backend 合成。
     """
     script_file = payload.get("script_file")
 
     def _prepare() -> tuple[dict, str]:
         _project = get_project_manager().load_project(project_name)
         _text = payload.get("text") or payload.get("prompt")
+        _field = "text"
         if not _text:
             if not script_file:
                 raise ValueError("tts task 需要 payload.text 或 payload.script_file 之一")
             _script = get_project_manager().load_script(project_name, script_file)
+            _mode = _script.get("content_mode") or _project.get("content_mode")
+            _field = voiceover_text_field(_mode) or ""
+            if not _field:
+                raise ValueError(f"content_mode={_mode!r} 没有可直接朗读的整段口播文案，不支持 TTS")
             _items, _id_field, *_ = get_storyboard_items(_script)
             _resolved = find_storyboard_item(_items, _id_field, resource_id)
             if _resolved is None:
                 raise ValueError(f"segment not found: {resource_id}")
             _segment, _ = _resolved
-            _text = _segment.get("novel_text")
+            _text = _segment.get(_field)
         if not isinstance(_text, str) or not _text.strip():
-            raise ValueError(f"segment {resource_id} 无可合成的旁白文本（novel_text 为空）")
+            raise ValueError(f"segment {resource_id} 无可合成的旁白文本（{_field} 为空）")
         return _project, _text.strip()
 
     project, text = await asyncio.to_thread(_prepare)

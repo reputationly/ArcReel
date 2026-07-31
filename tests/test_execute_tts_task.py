@@ -135,6 +135,49 @@ class TestExecuteTtsTask:
         with pytest.raises(ValueError, match="无可合成的旁白文本"):
             await generation_tasks.execute_tts_task("demo", "E1S02", {"script_file": "episode_1.json"})
 
+    async def test_ad_script_reads_voiceover_text(self, tts_env):
+        """ad 模式的口播在 voiceover_text 而非 novel_text。
+
+        ad 剧本生成时就按语速约束了每镜口播字数（见 prompt_builders_ad 的
+        voiceover_rate_note）——那个约束存在的前提就是这段文字要被念出来。字段名写死成
+        novel_text 会让 ad 项目永远配不出音，而剪映导出侧早已支持音频轨。
+        """
+        pm, gen = tts_env
+        pm.project = {"name": "demo", "content_mode": "ad"}
+        pm.script = {
+            "content_mode": "ad",
+            "shots": [
+                {"shot_id": "E1S01", "voiceover_text": "一只安静的杯子。"},
+                {"shot_id": "E1S02", "voiceover_text": "  "},
+            ],
+        }
+
+        await generation_tasks.execute_tts_task("demo", "E1S01", {"script_file": "episode_1.json"})
+
+        assert gen.audio_calls[0]["text"] == "一只安静的杯子。"
+        assert pm.updated_assets[0]["asset_type"] == "narration_audio"
+        assert pm.updated_assets[0]["scene_id"] == "E1S01"
+
+    async def test_ad_blank_voiceover_names_the_right_field(self, tts_env):
+        # 报错要指出实际读的字段，否则用户拿着 ad 剧本去找不存在的 novel_text。
+        pm, _gen = tts_env
+        pm.project = {"name": "demo", "content_mode": "ad"}
+        pm.script = {
+            "content_mode": "ad",
+            "shots": [{"shot_id": "E1S01", "voiceover_text": "  "}],
+        }
+        with pytest.raises(ValueError, match="voiceover_text 为空"):
+            await generation_tasks.execute_tts_task("demo", "E1S01", {"script_file": "episode_1.json"})
+
+    async def test_mode_without_single_voiceover_field_rejected(self, tts_env):
+        # drama 的口播是场景级有序 utterances，没有可直接朗读的整段文案：显式拒绝，
+        # 不取空串送去合成（那会产出一段静音并照常计费）。
+        pm, _gen = tts_env
+        pm.project = {"name": "demo", "content_mode": "drama"}
+        pm.script = {"content_mode": "drama", "scenes": [{"scene_id": "E1S01"}]}
+        with pytest.raises(ValueError, match="没有可直接朗读的整段口播文案"):
+            await generation_tasks.execute_tts_task("demo", "E1S01", {"script_file": "episode_1.json"})
+
     def test_tts_registered_in_executors_and_change_specs(self):
         assert generation_tasks._TASK_EXECUTORS["tts"] is generation_tasks.execute_tts_task
         kind, event, label, _ = generation_tasks._TASK_CHANGE_SPECS["tts"]

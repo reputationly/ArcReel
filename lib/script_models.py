@@ -747,6 +747,27 @@ class AdEpisodeScript(BaseModel):
     )
 
 
+#: content_mode → 该模式下"整条口播文案"所在的字段名。
+#:
+#: TTS 生成（``server.services.generation_tasks.execute_tts_task`` 与
+#: ``generate_narration_audio`` 工具）与剪映字幕导出（``jianying_draft_service``）
+#: 共用此表。两处各写一份必然漂移，而漂移的表现是「字幕有词、配音没声」这类
+#: 半残成片——两条链读的是同一份文案，字段名就该只有一处声明。
+#:
+#: drama 不登记：它的口播是场景级有序 ``utterances``，按 span 逐条派生而非单字段
+#: （见 ``jianying_draft_service._SPAN_SUBTITLE_MODES``）。未登记的模式即"没有可
+#: 直接朗读的整段文案"，调用方据此拒绝，而不是取空串送去合成。
+VOICEOVER_TEXT_FIELDS: dict[str, str] = {
+    "narration": "novel_text",
+    "ad": "voiceover_text",
+}
+
+
+def voiceover_text_field(content_mode: str | None) -> str | None:
+    """取该内容模式的口播文案字段名；模式不支持整段朗读时返回 None。"""
+    return VOICEOVER_TEXT_FIELDS.get((content_mode or "").strip().lower())
+
+
 # ============ 参考生视频模式（Reference Video） ============
 
 #: 参考生视频路径下单镜头时长的合法区间（秒）。短切节奏赖此成立：

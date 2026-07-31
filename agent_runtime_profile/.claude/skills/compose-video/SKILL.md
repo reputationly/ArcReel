@@ -9,7 +9,7 @@ description: 把已生成的视频片段按剧本顺序拼接为单集成片，�
 
 ## 适用范围（重要）
 
-- **仅 drama 模式** — 脚本读取剧本顶层 `scenes[]`；narration（`segments[]`）、ad（`shots[]`）和 reference_video（`video_units[]`）会被脚本拒绝。这些模式的成片导出请走 Web 端剪映草稿导出（ad 草稿含视频轨 + 口播文案字幕轨，导出后在剪映配音成片）
+- **仅 drama 模式** — 脚本读取剧本顶层 `scenes[]`；narration（`segments[]`）、ad（`shots[]`）和 reference_video（`video_units[]`）会被脚本拒绝。这些模式的成片导出请走 Web 端剪映草稿导出（ad 草稿含视频轨 + 口播文案字幕轨；先用 `generate-narration-audio` 配音，草稿会一并挂上音频轨）
 - **单集拼接** — 一次只处理一份剧本文件，不支持多集合并
 - **不实现片头片尾 / BGM 音量调节** — 这些需求请走 Web 端剪映草稿导出
 

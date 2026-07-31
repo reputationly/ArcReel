@@ -36,14 +36,6 @@ _TRANSITION_MAP: dict[str, TransitionType] = {
     "dissolve": TransitionType.叠化,
 }
 
-# content_mode → 整段单字幕文案源字段。narration 按朗读原文、ad 按每镜头口播文案，
-# 整段共用一条字幕。drama 不走单字段：口播是场景级有序 utterances，按 span 逐条派生
-# （见 _SPAN_SUBTITLE_MODES / _utterance_subtitle_spans），故不登记于此。
-_SUBTITLE_TEXT_FIELDS: dict[str, str] = {
-    "narration": "novel_text",
-    "ad": "voiceover_text",
-}
-
 # 字幕由有序 span 派生（而非单字段）的内容模式。drama 从 utterances 派生 subtitle_spans；
 # ad + reference_video 路径虽也产 span，但 content_mode 仍是 ad（已在 _SUBTITLE_TEXT_FIELDS），
 # 故此处只列 drama。未注册且不在此集合的模式（未知脏值）不挂字幕轨。
@@ -52,9 +44,15 @@ _SPAN_SUBTITLE_MODES: frozenset[str] = frozenset({"drama"})
 from lib.path_safety import PathTraversalError, safe_join, safe_resolve
 from lib.project_manager import ProjectManager, effective_mode
 from lib.reference_video.ad_units import ad_shots_by_id
-from lib.script_models import ad_shot_duration_seconds, get_generated_assets
+from lib.script_models import VOICEOVER_TEXT_FIELDS, ad_shot_duration_seconds, get_generated_assets
 from lib.script_skeleton import SKELETONS, resolve_declared_kind
 from lib.speech_rate import estimate_spoken_seconds
+
+# content_mode → 整段单字幕文案源字段。字幕与 TTS 读的是同一份口播文案，字段名因此
+# 收敛到 lib.script_models 单点声明（两处各写一份会漂移成「字幕有词、配音没声」）。
+# drama 不在表内：口播是场景级有序 utterances，按 span 逐条派生
+# （见 _SPAN_SUBTITLE_MODES / _utterance_subtitle_spans）。
+_SUBTITLE_TEXT_FIELDS = VOICEOVER_TEXT_FIELDS
 
 logger = logging.getLogger(__name__)
 

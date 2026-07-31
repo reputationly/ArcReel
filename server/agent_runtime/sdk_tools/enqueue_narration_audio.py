@@ -15,13 +15,13 @@ from lib.generation_queue_client import (
     batch_enqueue_and_wait,
 )
 from lib.resource_paths import resource_relative_path
-from lib.script_models import get_generated_assets, is_reference_script
+from lib.script_models import get_generated_assets, is_reference_script, voiceover_text_field
 from lib.storyboard_sequence import get_storyboard_items
 from server.agent_runtime.sdk_tools._context import ToolContext, tool_error, validate_script_filename
 
 
-def _has_voiceable_text(item: dict[str, Any]) -> bool:
-    text = item.get("novel_text")
+def _has_voiceable_text(item: dict[str, Any], text_field: str) -> bool:
+    text = item.get(text_field)
     return isinstance(text, str) and bool(text.strip())
 
 
@@ -37,10 +37,11 @@ def _select_items(items: list[dict[str, Any]], id_field: str, segment_ids: list[
 def generate_narration_audio_tool(ctx: ToolContext):
     @tool(
         "generate_narration_audio",
-        "为说书（narration）模式剧本逐段生成旁白配音（TTS），入队并等待完成。"
-        "script 为剧本文件名（如 episode_1.json）；segment_ids 指定片段 ID 列表"
+        "为说书（narration）与广告/短片（ad）模式剧本逐段生成旁白配音（TTS），入队并等待完成。"
+        "script 为剧本文件名（如 episode_1.json）；segment_ids 指定片段/镜头 ID 列表"
         "（不传则扫描所有缺旁白音频的段；传列表为批量范围；单元素列表即单段重生）。"
-        "音频以各段 novel_text 原文合成，只依赖剧本，不依赖分镜图/视频。",
+        "音频以 narration 的 novel_text 或 ad 的 voiceover_text 原文合成，"
+        "只依赖剧本，不依赖分镜图/视频。",
         {
             "type": "object",
             "properties": {
@@ -65,8 +66,14 @@ def generate_narration_audio_tool(ctx: ToolContext):
                 raise ValueError(f"segment_ids 必须是片段 ID 数组，收到: {segment_ids!r}")
 
             script = ctx.pm.load_script(ctx.project_name, script_filename)
-            if script.get("content_mode") == "drama":
-                raise ValueError("旁白配音仅适用说书（narration）模式剧本；drama 模式的 scenes 没有 novel_text")
+            # 可配音与否取决于「该模式有没有可直接朗读的整段文案」，按登记表判定而非
+            # 逐个模式硬编码：drama 的口播是场景级有序 utterances，没有单字段整段文案。
+            text_field = voiceover_text_field(script.get("content_mode"))
+            if not text_field:
+                raise ValueError(
+                    f"旁白配音适用说书（narration）与广告（ad）模式剧本；"
+                    f"content_mode={script.get('content_mode')!r} 没有可直接朗读的整段口播文案"
+                )
 
             items, id_field, *_ = get_storyboard_items(script)
             if not items:
@@ -101,14 +108,14 @@ def generate_narration_audio_tool(ctx: ToolContext):
             # 缺 id 的片段（损坏/手改剧本）不能让整批 KeyError 中断，跳过并告警。
             identified = [item for item in selected if item.get(id_field)]
             missing_id_count = len(selected) - len(identified)
-            voiceable = [item for item in identified if _has_voiceable_text(item)]
-            blank = [str(item[id_field]) for item in identified if not _has_voiceable_text(item)]
+            voiceable = [item for item in identified if _has_voiceable_text(item, text_field)]
+            blank = [str(item[id_field]) for item in identified if not _has_voiceable_text(item, text_field)]
             specs = [
                 TaskSpec.from_request(
                     task_type="tts",
                     media_type="audio",
                     resource_id=str(item[id_field]),
-                    prompt=item["novel_text"],
+                    prompt=item[text_field],
                     script_file=script_filename,
                 )
                 for item in voiceable
@@ -133,7 +140,7 @@ def generate_narration_audio_tool(ctx: ToolContext):
             # 显式点名时按失败处理——调用方明确要这一段，给"成功 0 失败 0"会误导。
             mark = "✗" if explicit else "⚠️"
             for sid in blank:
-                details.append(f"  {mark} {sid}: novel_text 为空，无法配音")
+                details.append(f"  {mark} {sid}: {text_field} 为空，无法配音")
             for sid in unmatched:
                 details.append(f"  ✗ {sid}: 片段不存在")
             if missing_id_count:
