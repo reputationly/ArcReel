@@ -125,11 +125,18 @@ class _FakeLedger:
 class _FakeConfigResolver:
     """Fake ConfigResolver，返回可控的配置值。"""
 
-    def __init__(self, video_generate_audio: bool = False):
+    def __init__(self, video_generate_audio: bool = False, video_frame_interpolation: bool = True):
         self._video_generate_audio = video_generate_audio
+        self._video_frame_interpolation = video_frame_interpolation
 
     async def video_generate_audio(self, project_name=None):
         return self._video_generate_audio
+
+    async def video_frame_interpolation(self):
+        return self._video_frame_interpolation
+
+    async def image_quality_mode(self):
+        return False
 
     async def reference_payload_limits(self, provider_id=None):
         # 与真实 resolver 同契约：provider_id 为 None 或未配置时返回 service 层保守默认。

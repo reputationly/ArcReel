@@ -13,6 +13,8 @@ function makeConfigResponse(overrides?: Partial<GetSystemConfigResponse["setting
       text_backend_simple: "",
       text_backend_complex: "",
       video_generate_audio: true,
+      video_frame_interpolation: true,
+      image_quality_mode: false,
       anthropic_api_key: { is_set: false, masked: null },
       anthropic_base_url: "",
       anthropic_model: "",

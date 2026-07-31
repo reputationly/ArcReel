@@ -801,6 +801,12 @@ async def test_execute_reference_video_task_uses_real_media_generator(tmp_path: 
         async def video_generate_audio(self, _project_name=None):
             return False
 
+        async def video_frame_interpolation(self):
+            return True
+
+        async def image_quality_mode(self):
+            return False
+
         async def reference_payload_limits(self, _provider_id=None):
             from lib.config.service import (
                 _DEFAULT_REFERENCE_SINGLE_MAX_BYTES,

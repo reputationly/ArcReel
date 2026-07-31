@@ -401,6 +401,14 @@ class ConfigResolver:
     # server/routers/system_config.py 与 lib/media_generator.py 均通过引用此常量读取。
     _DEFAULT_VIDEO_GENERATE_AUDIO = True
 
+    # 插帧默认开：只对支持插帧的自建模型生效（白名单在 backend 侧），其余模型该开关是空操作，
+    # 默认开不会给第三方模型多发参数。此设置是全局 kill switch，无项目级覆盖。
+    _DEFAULT_VIDEO_FRAME_INTERPOLATION = True
+
+    # 图片质量档默认关：命中白名单的模型（HunyuanImage-3.0）开启后出图耗时约 2.8 倍，
+    # 收益随场景变化很大，不能替用户默认承担这个代价。全局 kill switch，无项目级覆盖。
+    _DEFAULT_IMAGE_QUALITY_MODE = False
+
     def __init__(
         self,
         session_factory: async_sessionmaker,
@@ -439,6 +447,23 @@ class ConfigResolver:
         """
         async with self._open_session() as (session, svc):
             return await self._resolve_video_generate_audio(svc, project_name)
+
+    async def video_frame_interpolation(self) -> bool:
+        """解析 video_frame_interpolation（插帧总开关）。
+
+        优先级：全局配置 > 默认值(True)。与 generate_audio 不同，这里刻意不做项目级覆盖——
+        插帧是"引擎支持就用"的画质增强，不是内容语义，不需要按项目分档。
+        """
+        async with self._open_session() as (session, svc):
+            return await self._resolve_video_frame_interpolation(svc)
+
+    async def image_quality_mode(self) -> bool:
+        """解析 image_quality_mode（图片质量档总开关）。
+
+        优先级：全局配置 > 默认值(False)。同插帧，不做项目级覆盖。
+        """
+        async with self._open_session() as (session, svc):
+            return await self._resolve_image_quality_mode(svc)
 
     async def default_video_backend(self) -> tuple[str, str]:
         """返回系统级默认 (provider_id, model_id)（不含项目级覆盖）。"""
@@ -716,6 +741,14 @@ class ConfigResolver:
                     value = bool(override)
 
         return value
+
+    async def _resolve_video_frame_interpolation(self, svc: ConfigService) -> bool:
+        raw = await svc.get_setting("video_frame_interpolation", "")
+        return _parse_bool(raw) if raw else self._DEFAULT_VIDEO_FRAME_INTERPOLATION
+
+    async def _resolve_image_quality_mode(self, svc: ConfigService) -> bool:
+        raw = await svc.get_setting("image_quality_mode", "")
+        return _parse_bool(raw) if raw else self._DEFAULT_IMAGE_QUALITY_MODE
 
     async def _resolve_default_video_backend(self, svc: ConfigService, session: AsyncSession) -> tuple[str, str]:
         raw = await svc.get_setting("default_video_backend", "")

@@ -361,13 +361,23 @@ class _FakeTextBackend:
 
 
 class _FakeConfigResolver:
-    """generate/resume_video_async 仅消费 video_generate_audio 这一个配置读点。"""
+    """generate/resume_video_async 的配置读点：video_generate_audio + video_frame_interpolation。
 
-    def __init__(self, *, video_generate_audio: bool = True) -> None:
+    两者都不参与记账（插帧不改计费维度），列在这里只是为了让 MediaGenerator 的读取不炸。
+    """
+
+    def __init__(self, *, video_generate_audio: bool = True, video_frame_interpolation: bool = True) -> None:
         self._video_generate_audio = video_generate_audio
+        self._video_frame_interpolation = video_frame_interpolation
 
     async def video_generate_audio(self, project_name: str | None = None) -> bool:
         return self._video_generate_audio
+
+    async def video_frame_interpolation(self) -> bool:
+        return self._video_frame_interpolation
+
+    async def image_quality_mode(self) -> bool:
+        return False
 
 
 def _media_generator(

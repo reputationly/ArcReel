@@ -776,7 +776,8 @@ class TestNewAPITaskEnvelope:
         # 统一契约:new-api 的 TaskSubmitReq 只读 size 与 metadata，width/height/顶层 seed 会被丢掉。
         body = mock_client.post.call_args.kwargs["json"]
         assert body["size"] == "1280x720"
-        assert body["metadata"] == {"seed": 7}
+        # wan2.2-i2v 命中插帧白名单，故 metadata 除 seed 外还带 target_fps（见 TestFrameInterpolation）。
+        assert body["metadata"] == {"seed": 7, "target_fps": 32}
 
 
 class TestNewAPIImageModes:
@@ -967,3 +968,61 @@ class TestNewAPIImageModes:
         assert body["image"] == body["images"][0]
         assert body["metadata"]["image_tail"] == body["images"][1]
         assert "image_role" not in body["metadata"]
+
+
+class TestFrameInterpolation:
+    """插帧只对白名单里的自建模型下发 metadata.target_fps，且受请求开关控制。"""
+
+    async def _submit(self, tmp_path: Path, *, model: str, frame_interpolation: bool = True) -> dict:
+        create_resp = _make_response(200, {"task_id": "t-vfi", "status": "queued"})
+        done = _make_response(200, {"task_id": "t-vfi", "status": "completed", "url": "https://x/o.mp4"})
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=create_resp)
+        mock_client.get = AsyncMock(return_value=done)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("lib.video_backends.newapi._POLL_INTERVAL_SECONDS", 0.0),
+            patch("lib.video_backends.newapi.download_video", AsyncMock(side_effect=_fake_download_factory(b"v"))),
+        ):
+            from lib.video_backends.newapi import NewAPIVideoBackend
+
+            backend = NewAPIVideoBackend(api_key="k", base_url="https://x/v1", model=model)
+            await backend.generate(
+                VideoGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.mp4",
+                    aspect_ratio="9:16",
+                    duration_seconds=5,
+                    frame_interpolation=frame_interpolation,
+                )
+            )
+        return mock_client.post.call_args.kwargs["json"]
+
+    async def test_whitelisted_model_sends_target_fps(self, tmp_path: Path):
+        for model in ("wan2.2-i2v", "wan2.2-t2v"):
+            body = await self._submit(tmp_path, model=model)
+            assert body["metadata"]["target_fps"] == 32, model
+
+    async def test_model_id_is_case_and_space_insensitive(self, tmp_path: Path):
+        body = await self._submit(tmp_path, model=" WAN2.2-I2V ")
+        assert body["metadata"]["target_fps"] == 32
+
+    async def test_third_party_lookalikes_are_excluded(self, tmp_path: Path):
+        """阿里云的 wan2.2-i2v-plus / -flash 是同名不同货的第三方模型，不能靠子串匹配命中。"""
+        for model in ("wan2.2-i2v-plus", "wan2.2-i2v-flash", "wan2.2-t2v-plus", "kling-v1"):
+            body = await self._submit(tmp_path, model=model)
+            assert "target_fps" not in (body.get("metadata") or {}), model
+
+    async def test_switch_off_skips_target_fps(self, tmp_path: Path):
+        body = await self._submit(tmp_path, model="wan2.2-i2v", frame_interpolation=False)
+        assert "target_fps" not in (body.get("metadata") or {})
+
+    def test_supports_frame_interpolation_helper(self):
+        from lib.video_backends.newapi import supports_frame_interpolation
+
+        assert supports_frame_interpolation("wan2.2-i2v") is True
+        assert supports_frame_interpolation("wan2.2-i2v-plus") is False
+        assert supports_frame_interpolation("") is False

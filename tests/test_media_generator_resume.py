@@ -136,6 +136,12 @@ class _FakeConfigResolver:
     async def video_generate_audio(self, _project_name=None):
         return True
 
+    async def video_frame_interpolation(self):
+        return True
+
+    async def image_quality_mode(self):
+        return False
+
 
 def _build_generator(tmp_path: Path, *, initial_version: int = 0) -> MediaGenerator:
     gen = object.__new__(MediaGenerator)

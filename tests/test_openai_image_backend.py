@@ -518,3 +518,75 @@ class TestModeGating:
             assert excinfo.value.code == "image_endpoint_mismatch_no_i2i"
             assert excinfo.value.params.get("model") == "m"
             assert excinfo.value.params.get("detail") == "all reference images failed to open"
+
+
+class TestQualityMode:
+    """质量档（bot_task）只对白名单模型下发，且受请求开关控制。"""
+
+    @staticmethod
+    def _png(tmp_path: Path) -> Path:
+        p = tmp_path / "ref.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+        return p
+
+    async def _t2i_kwargs(self, tmp_path: Path, *, model: str, quality_mode: bool) -> dict:
+        b64 = base64.b64encode(b"png").decode()
+        mock_client = AsyncMock()
+        mock_client.images.generate = AsyncMock(return_value=_make_mock_image_response(b64))
+        with patch("lib.openai_shared.AsyncOpenAI", return_value=mock_client):
+            from lib.image_backends.openai import OpenAIImageBackend
+
+            backend = OpenAIImageBackend(api_key="k", model=model)
+            await backend.generate(
+                ImageGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.png",
+                    aspect_ratio="9:16",
+                    image_size="1K",
+                    quality_mode=quality_mode,
+                )
+            )
+        return mock_client.images.generate.call_args[1]
+
+    async def test_t2i_sends_bot_task_for_whitelisted_model(self, tmp_path: Path):
+        kwargs = await self._t2i_kwargs(tmp_path, model="hunyuan-image-3", quality_mode=True)
+        assert kwargs["extra_body"] == {"bot_task": "think_recaption"}
+
+    async def test_t2i_skips_bot_task_when_switch_off(self, tmp_path: Path):
+        kwargs = await self._t2i_kwargs(tmp_path, model="hunyuan-image-3", quality_mode=False)
+        assert "extra_body" not in kwargs
+
+    async def test_t2i_skips_bot_task_for_other_models(self, tmp_path: Path):
+        """bot_task 是混元专有字段，发给别家模型可能直接 400，故非白名单一律不下发。"""
+        for model in ("gpt-image-2", "z-image", "qwen-image-edit"):
+            kwargs = await self._t2i_kwargs(tmp_path, model=model, quality_mode=True)
+            assert "extra_body" not in kwargs, model
+
+    async def test_i2i_sends_bot_task_as_well(self, tmp_path: Path):
+        """edits 走 multipart，SDK 把 extra_body 并进表单字段——网关正是从表单读该键。"""
+        b64 = base64.b64encode(b"png").decode()
+        mock_client = AsyncMock()
+        mock_client.images.edit = AsyncMock(return_value=_make_mock_image_response(b64))
+        with patch("lib.openai_shared.AsyncOpenAI", return_value=mock_client):
+            from lib.image_backends.openai import OpenAIImageBackend
+
+            backend = OpenAIImageBackend(api_key="k", model="hunyuanimage-3")
+            await backend.generate(
+                ImageGenerationRequest(
+                    prompt="p",
+                    output_path=tmp_path / "o.png",
+                    reference_images=[ReferenceImage(path=str(self._png(tmp_path)))],
+                    aspect_ratio="9:16",
+                    image_size="1K",
+                    quality_mode=True,
+                )
+            )
+        assert mock_client.images.edit.call_args[1]["extra_body"] == {"bot_task": "think_recaption"}
+
+    def test_supports_quality_mode_helper(self):
+        from lib.image_backends.openai import supports_quality_mode
+
+        assert supports_quality_mode("hunyuan-image-3") is True
+        assert supports_quality_mode("HunyuanImage-3.0") is True
+        assert supports_quality_mode("gpt-image-2") is False
+        assert supports_quality_mode("") is False

@@ -134,6 +134,39 @@ class TestVideoGenerateAudio:
         assert result is False
 
 
+class TestVideoFrameInterpolation:
+    """插帧总开关：全局设置 + 默认开，无项目级覆盖。"""
+
+    async def test_default_is_true_when_db_empty(self):
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        assert await resolver._resolve_video_frame_interpolation(_FakeConfigService(settings={})) is True
+
+    async def test_global_switch_off(self):
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        fake_svc = _FakeConfigService(settings={"video_frame_interpolation": "false"})
+        assert await resolver._resolve_video_frame_interpolation(fake_svc) is False
+
+    async def test_bool_parsing_variants(self):
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        for val, expected in [("TRUE", True), ("1", True), ("yes", True), ("0", False), ("no", False), ("", True)]:
+            fake_svc = _FakeConfigService(settings={"video_frame_interpolation": val} if val else {})
+            result = await resolver._resolve_video_frame_interpolation(fake_svc)
+            assert result is expected, f"Failed for {val!r}: got {result}"
+
+
+class TestImageQualityMode:
+    """图片质量档总开关：全局设置 + 默认关，无项目级覆盖。"""
+
+    async def test_default_is_false_when_db_empty(self):
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        assert await resolver._resolve_image_quality_mode(_FakeConfigService(settings={})) is False
+
+    async def test_global_switch_on(self):
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        fake_svc = _FakeConfigService(settings={"image_quality_mode": "true"})
+        assert await resolver._resolve_image_quality_mode(fake_svc) is True
+
+
 class TestDefaultBackends:
     """验证 video/image 后端解析：显式值 vs auto-resolve。"""
 

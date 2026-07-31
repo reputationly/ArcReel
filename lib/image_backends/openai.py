@@ -48,6 +48,23 @@ def _quality_for(image_size: str | None) -> str | None:
     return _QUALITY_MAP_CI.get(image_size.strip().lower()) if image_size else None
 
 
+# 质量档（HunyuanImage-3.0 的自回归阶段）：模型先思考、改写提示词再出图，出图更贴合描述，
+# 代价是耗时约 2.8 倍。开关以 bot_task 顶层字段下发（JSON 走请求体、multipart 走表单字段，
+# SDK 的 extra_body 两条路径都覆盖），不下发即引擎快档（bot_task 缺省 None）。
+_QUALITY_MODE_BOT_TASK = "think_recaption"
+
+# 支持质量档的模型白名单（子串匹配，大小写无关）：只有 HunyuanImage-3.0 有 AR 阶段。
+# 不做全模型下发——bot_task 是混元专有字段，发给真 OpenAI 或别家网关可能直接 400。
+# 反过来，中转渠道若把该模型改名到白名单外，这里就不下发（宁可少一档也不误伤别家模型）。
+_QUALITY_MODE_MODELS = ("hunyuan-image-3", "hunyuanimage-3")
+
+
+def supports_quality_mode(model: str) -> bool:
+    """model 是否支持质量档（bot_task）。"""
+    name = (model or "").strip().lower()
+    return any(key in name for key in _QUALITY_MODE_MODELS)
+
+
 def _resolve_openai_params(
     image_size: str | None,
     aspect_ratio: str,
@@ -122,6 +139,17 @@ class OpenAIImageBackend:
             raise ImageCapabilityError("image_endpoint_mismatch_no_t2i", model=self._model)
         return await (self._generate_edit(request) if has_refs else self._generate_create(request))
 
+    def _quality_mode_kwargs(self, request: ImageGenerationRequest) -> dict:
+        """质量档命中时给出 extra_body；否则空 dict（不下发即上游快档）。
+
+        走 extra_body 而非顶层 kwarg：bot_task 不是 OpenAI 官方图片参数，SDK 的方法签名没有
+        它。extra_body 在 JSON 请求里并进请求体、在 multipart（edits）里并进表单字段，正好
+        对上网关两条读取路径。
+        """
+        if not (request.quality_mode and supports_quality_mode(self._model)):
+            return {}
+        return {"extra_body": {"bot_task": _QUALITY_MODE_BOT_TASK}}
+
     async def _generate_create(self, request: ImageGenerationRequest) -> ImageGenerationResult:
         kwargs = {
             "model": self._model,
@@ -129,6 +157,7 @@ class OpenAIImageBackend:
             "n": 1,
         }
         kwargs.update(_resolve_openai_params(request.image_size, request.aspect_ratio))
+        kwargs.update(self._quality_mode_kwargs(request))
         logger.info("调用 %s 图片 SDK (T2I) kwargs=%s", self.name, format_kwargs_for_log(kwargs))
         response = await self._client.images.generate(**kwargs)
         return await self._save_and_return(response, request)
@@ -174,6 +203,7 @@ class OpenAIImageBackend:
                 "prompt": request.prompt,
             }
             edit_kwargs.update(_resolve_openai_params(request.image_size, request.aspect_ratio))
+            edit_kwargs.update(self._quality_mode_kwargs(request))
             logger.info(
                 "调用 %s 图片 SDK (I2I) kwargs=%s",
                 self.name,

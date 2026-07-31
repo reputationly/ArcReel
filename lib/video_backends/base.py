@@ -431,6 +431,10 @@ class VideoGenerationRequest:
     reference_audio_files: list[Path] | None = None
     generate_audio: bool = True
 
+    # 插帧总开关（系统设置 video_frame_interpolation，默认开）。开着也只对支持插帧的
+    # 自建模型生效——具体模型白名单由各 backend 自己判定（当前仅 newapi 中转实现）。
+    frame_interpolation: bool = True
+
     # 项目上下文（用于构建文件服务 URL 等）
     project_name: str | None = None
 

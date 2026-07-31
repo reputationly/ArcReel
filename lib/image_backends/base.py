@@ -87,6 +87,10 @@ class ImageGenerationRequest:
     project_name: str | None = None
     seed: int | None = None
 
+    # 质量档总开关（系统设置 image_quality_mode，默认关）。开着也只对支持"先思考再出图"
+    # 的模型生效——具体模型白名单由各 backend 自己判定（当前仅 openai 兼容后端实现）。
+    quality_mode: bool = False
+
 
 @dataclass
 class ImageGenerationResult:

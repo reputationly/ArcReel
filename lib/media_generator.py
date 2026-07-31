@@ -348,6 +348,15 @@ class MediaGenerator:
                 model=self._image_backend.model,
             )
 
+        # 质量档总开关：全局设置，无项目级覆盖，也不进版本元数据（重生成时随当时的系统设置走）。
+        # 开着也只对 backend 白名单里的模型生效。
+        if self._config is not None:
+            quality_mode = await self._config.image_quality_mode()
+        else:
+            from lib.config.resolver import ConfigResolver
+
+            quality_mode = ConfigResolver._DEFAULT_IMAGE_QUALITY_MODE
+
         # 2. 记账括号：进入落 pending，成功以 call.success(result) 递交 backend 结果对象，
         #    Exception 自动翻 failed 后重抛，CancelledError 穿透留 pending。
         async with self.ledger.record(
@@ -378,6 +387,7 @@ class MediaGenerator:
                         aspect_ratio=aspect_ratio,
                         image_size=image_size,
                         project_name=self.project_name,
+                        quality_mode=quality_mode,
                     )
                 )
 
@@ -628,10 +638,14 @@ class MediaGenerator:
 
         if self._config is not None:
             configured_generate_audio = await self._config.video_generate_audio(self.project_name)
+            # 插帧总开关：全局设置，无项目级覆盖，也不进版本元数据（不是内容语义，
+            # 重生成时随当时的系统设置走）。开着也只对 backend 白名单里的自建模型生效。
+            frame_interpolation = await self._config.video_frame_interpolation()
         else:
             from lib.config.resolver import ConfigResolver
 
             configured_generate_audio = ConfigResolver._DEFAULT_VIDEO_GENERATE_AUDIO
+            frame_interpolation = ConfigResolver._DEFAULT_VIDEO_FRAME_INTERPOLATION
         effective_generate_audio = version_metadata.get("generate_audio", configured_generate_audio)
 
         # video 实际计费时长（result.duration_seconds）覆盖请求时长的语义转写已收进 ledger union
@@ -695,6 +709,7 @@ class MediaGenerator:
                         # 「音频N」的指认顺序，任何重排都会把 A 角色的音色安到 B 角色头上。
                         reference_audio_files=reference_audio_files,
                         generate_audio=effective_generate_audio,
+                        frame_interpolation=frame_interpolation,
                         project_name=self.project_name,
                         task_id=task_id,
                         service_tier=version_metadata.get("service_tier", "default"),

@@ -51,6 +51,22 @@ _VIDEO_ROUND_TO = 8
 # Seedance 2.0 多模态参考图上限（上游 1~9 张）。
 _MAX_REFERENCE_IMAGES = 9
 
+# 插帧（RIFE 帧率翻倍）：随 metadata.target_fps 透传给 NewAPI，网关不校验该键、原样下发给
+# 自建引擎（gpustack 门面对非控制字段直通，LightX2V 收到后折进 video_frame_interpolation）。
+# 生成默认 16fps、RIFE v1 只做 16→32 的 2 倍插帧，故目标帧率恒为 32。
+_INTERPOLATION_TARGET_FPS = 32
+
+# 支持插帧的模型白名单——必须精确匹配，不能用子串。自建 gpustack 渠道的 wan2.2-t2v /
+# wan2.2-i2v 才走 RIFE；阿里云渠道的 wan2.2-i2v-plus / wan2.2-i2v-flash / wan2.2-t2v-plus
+# 是同名不同货的第三方模型，子串匹配会把 target_fps 发给厂商（无插帧效果，且平白多一个
+# 上游可能拒收的未知参数）。新增自建插帧模型时在此登记。
+_INTERPOLATION_MODELS = frozenset({"wan2.2-t2v", "wan2.2-i2v"})
+
+
+def supports_frame_interpolation(model: str) -> bool:
+    """model 是否在插帧白名单内（大小写与首尾空白无关）。"""
+    return (model or "").strip().lower() in _INTERPOLATION_MODELS
+
 
 def _is_seedance(model: str) -> bool:
     return "seedance" in model
@@ -132,6 +148,12 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
         if request.seed is not None:
             payload["seed"] = request.seed
             metadata["seed"] = request.seed
+
+        # 插帧只对白名单里的自建模型下发。这是尽力而为的增强：引擎侧没开 VFI 时只会 warning
+        # 后按原帧率出片（不报错），所以调用方不能假定产物一定是 32fps —— 实际帧率以回包
+        # metadata.fps 为准。顶层 fps 字段对该网关无效（不被转发），只有 metadata.target_fps 生效。
+        if request.frame_interpolation and supports_frame_interpolation(self._model):
+            metadata["target_fps"] = _INTERPOLATION_TARGET_FPS
 
         images, image_role = self._collect_images(request)
         if images:

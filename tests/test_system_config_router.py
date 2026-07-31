@@ -144,6 +144,8 @@ class TestGetSystemConfig:
             "default_image_backend_i2i",
             "default_text_backend",
             "video_generate_audio",
+            "video_frame_interpolation",
+            "image_quality_mode",
             "anthropic_api_key",
             "anthropic_base_url",
             "anthropic_model",

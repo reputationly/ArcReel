@@ -144,6 +144,9 @@ export function MediaModelSection() {
     settings.default_image_backend ??
     "";
   const currentAudio = draft.video_generate_audio ?? settings.video_generate_audio ?? false;
+  const currentInterpolation =
+    draft.video_frame_interpolation ?? settings.video_frame_interpolation ?? true;
+  const currentQualityMode = draft.image_quality_mode ?? settings.image_quality_mode ?? false;
 
   // 全局设置页无项目上下文，档位读目录端点的服务端派生值（generation_mode 未知，native 恒降格），
   // 不打 /video-capabilities——该端点按项目解析。
@@ -239,6 +242,22 @@ export function MediaModelSection() {
             <span className="text-[11px] text-text-4">{t("audio_support_hint")}</span>
           </label>
         </div>
+
+        <div className="mt-3 flex items-start gap-2.5 text-[12.5px] text-text-2">
+          <input
+            id="media-frame-interpolation"
+            type="checkbox"
+            checked={currentInterpolation}
+            onChange={(e) =>
+              setDraft((prev) => ({ ...prev, video_frame_interpolation: e.target.checked }))
+            }
+            className="mt-0.5 h-3.5 w-3.5 cursor-pointer rounded border-hairline bg-bg-grad-a accent-[var(--color-accent)]"
+          />
+          <label htmlFor="media-frame-interpolation" className="flex cursor-pointer flex-col">
+            <span>{t("frame_interpolation")}</span>
+            <span className="text-[11px] text-text-4">{t("frame_interpolation_hint")}</span>
+          </label>
+        </div>
       </SectionCard>
 
       {/* Image */}
@@ -267,6 +286,22 @@ export function MediaModelSection() {
         ) : (
           emptyHint(t("no_image_providers_hint"))
         )}
+
+        <div className="mt-4 flex items-start gap-2.5 text-[12.5px] text-text-2">
+          <input
+            id="media-image-quality-mode"
+            type="checkbox"
+            checked={currentQualityMode}
+            onChange={(e) =>
+              setDraft((prev) => ({ ...prev, image_quality_mode: e.target.checked }))
+            }
+            className="mt-0.5 h-3.5 w-3.5 cursor-pointer rounded border-hairline bg-bg-grad-a accent-[var(--color-accent)]"
+          />
+          <label htmlFor="media-image-quality-mode" className="flex cursor-pointer flex-col">
+            <span>{t("image_quality_mode")}</span>
+            <span className="text-[11px] text-text-4">{t("image_quality_mode_hint")}</span>
+          </label>
+        </div>
       </SectionCard>
 
       {/* Text */}

@@ -191,6 +191,8 @@ class SystemConfigPatchRequest(BaseModel):
     narration_voice: str | None = None
     narration_speed: float | None = None
     video_generate_audio: bool | None = None
+    video_frame_interpolation: bool | None = None
+    image_quality_mode: bool | None = None
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
     anthropic_model: str | None = None
@@ -241,6 +243,18 @@ async def get_system_config(
         if video_generate_audio_raw
         else ConfigResolver._DEFAULT_VIDEO_GENERATE_AUDIO
     )
+    video_frame_interpolation_raw = all_s.get("video_frame_interpolation", "")
+    video_frame_interpolation = (
+        video_frame_interpolation_raw.lower() in ("true", "1", "yes")
+        if video_frame_interpolation_raw
+        else ConfigResolver._DEFAULT_VIDEO_FRAME_INTERPOLATION
+    )
+    image_quality_mode_raw = all_s.get("image_quality_mode", "")
+    image_quality_mode = (
+        image_quality_mode_raw.lower() in ("true", "1", "yes")
+        if image_quality_mode_raw
+        else ConfigResolver._DEFAULT_IMAGE_QUALITY_MODE
+    )
     anthropic_key = all_s.get("anthropic_api_key", "")
     # 兼容新凭证目录：旧 system_settings 没填但 agent_anthropic_credentials 有 active 时
     # 也算 is_set，避免 dashboard "未配置" 红点误报
@@ -264,6 +278,8 @@ async def get_system_config(
         "narration_voice": all_s.get("narration_voice", ""),
         "narration_speed": narration_speed,
         "video_generate_audio": video_generate_audio,
+        "video_frame_interpolation": video_frame_interpolation,
+        "image_quality_mode": image_quality_mode,
         "anthropic_api_key": {
             "is_set": bool(anthropic_key),
             "masked": mask_secret(anthropic_key) if anthropic_key else None,
@@ -369,8 +385,9 @@ async def patch_system_config(
             await svc.set_setting("narration_speed", str(speed))
 
     # Boolean settings
-    if "video_generate_audio" in patch and patch["video_generate_audio"] is not None:
-        await svc.set_setting("video_generate_audio", "true" if patch["video_generate_audio"] else "false")
+    for bool_key in ("video_generate_audio", "video_frame_interpolation", "image_quality_mode"):
+        if bool_key in patch and patch[bool_key] is not None:
+            await svc.set_setting(bool_key, "true" if patch[bool_key] else "false")
 
     # Anthropic API key (secret)
     if "anthropic_api_key" in patch:
