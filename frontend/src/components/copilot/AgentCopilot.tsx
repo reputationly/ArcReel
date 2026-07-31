@@ -11,6 +11,7 @@ import { useAssistantSession } from "@/hooks/useAssistantSession";
 import type { AttachedImage } from "@/hooks/useAssistantSession";
 import { GlassPopover } from "@/components/ui/GlassPopover";
 import { ContextBanner } from "./ContextBanner";
+import { NextStepCard } from "./NextStepCard";
 import { PendingQuestionWizard } from "./PendingQuestionWizard";
 import { SlashCommandMenu } from "./SlashCommandMenu";
 import type { SlashCommandMenuHandle } from "./SlashCommandMenu";
@@ -500,6 +501,7 @@ export function AgentCopilot() {
             >
               {t("quick_skill_hint")}
             </p>
+            <NextStepCard />
           </div>
         )}
         {allTurns.map((turn, i) => (
