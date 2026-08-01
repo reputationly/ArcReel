@@ -90,4 +90,6 @@ class TestResourceTypes:
             "products",
             "grids",
             "reference_videos",
+            "music",
+            "singing",
         }

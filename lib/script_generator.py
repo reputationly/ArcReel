@@ -12,13 +12,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from lib.config.registry import PROVIDER_REGISTRY
 from lib.config.resolver import ConfigResolver, constrain_durations_for_project
 from lib.db import async_session_factory
 from lib.episode_paths import (
+    NO_STEP1_CONTENT_MODES,
     REFERENCE_VIDEO_STEP1_FILENAME,
     REFERENCE_VIDEO_STEP1_LEGACY_FILENAME,
     STEP1_FILENAMES,
@@ -28,6 +29,7 @@ from lib.episode_paths import (
 )
 from lib.project_manager import ProjectManager, effective_mode
 from lib.prompt_builders_ad import build_ad_prompt
+from lib.prompt_builders_mv import build_mv_prompt
 from lib.prompt_builders_reference import build_reference_video_prompt
 from lib.prompt_builders_script import (
     build_drama_prompt,
@@ -36,15 +38,11 @@ from lib.prompt_builders_script import (
 )
 from lib.script_models import (
     AD_TARGET_DURATION_DRIFT_THRESHOLD,
-    AdEpisodeScript,
-    DramaEpisodeScript,
     DramaSceneContent,
     DramaVisualScript,
-    NarrationEpisodeScript,
     NarrationStep1Draft,
     NarrationVisualEpisodeScript,
     ReferenceStep1Draft,
-    ReferenceVideoScript,
     ad_script_total_duration,
     build_ad_reference_episode_script_model,
     build_episode_script_model,
@@ -53,6 +51,7 @@ from lib.script_models import (
     script_duration_total,
 )
 from lib.script_skeleton import SKELETONS, resolve_declared_kind
+from lib.script_structure_validator import model_for_kind
 from lib.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextGenerationRequest, TextTaskType
 from lib.text_generator import TextGenerator
 from lib.text_utils import strip_json_code_fences
@@ -72,15 +71,6 @@ _EID_PREFIX_RE = re.compile(r"^E\d+(?=[SU])")
 _QUALITY_PROBE_SCENE_MIN_LEN = 40
 _QUALITY_PROBE_ACTION_MIN_LEN = 25
 _QUALITY_PROBE_SHOT_TEXT_MIN_LEN = 15
-
-# 骨架种类 → 响应校验模型。模型类属上层依赖、不进 SKELETONS 窄表，映射留本地。
-# 键与 SKELETONS 逐一对应；新增第五种骨架时穷尽性断言逐个报红。
-_KIND_PARSE_SCHEMA: dict[str, type[BaseModel]] = {
-    "segments": NarrationEpisodeScript,
-    "scenes": DramaEpisodeScript,
-    "shots": AdEpisodeScript,
-    "video_units": ReferenceVideoScript,
-}
 
 # 骨架种类 → metadata 统计的计数键名。计数键名为业务附着（video_units→total_units 非
 # f"total_{kind}"），随 kind 显式保留、不进 SKELETONS 窄表。
@@ -205,6 +195,12 @@ class ScriptGenerator:
         # ad 一键生成不走 step1 中间文件，创作输入是 brief + 产品信息 + target_duration。
         if self.content_mode == "ad":
             prompt, schema = await self._compose_ad(episode, gen_mode)
+            return await self._generate_and_save(prompt, schema, episode, output_filename)
+
+        # mv 与 ad 同为一键生成、不读 step1：创作输入是**剧本顶层**的 song + lyrics
+        # （歌曲先于剧本存在，剧本是按歌排的镜头表），故也先于 generation_mode 分派。
+        if self.content_mode == "mv":
+            prompt, schema = await self._compose_mv(episode, gen_mode)
             return await self._generate_and_save(prompt, schema, episode, output_filename)
 
         # drama（storyboard / grid）走两段式（见 ADR 0041）：step1 内容已是结构化 JSON，
@@ -433,6 +429,20 @@ class ScriptGenerator:
         # 补充元数据
         script_data = self._add_metadata(script_data, episode)
 
+        # MV：song / lyrics 不在 LLM 输出里（SkipJsonSchema），但它们是**已定稿**的输入
+        # ——歌曲的实测时长与段落表、用户改过的歌词。重排镜头是常规操作（改段落划分、
+        # 换视频模型档位都要重排），不保留就会在每次重生成时被冲掉，用户得重新作曲写词。
+        #
+        # 已有值**无条件**胜出，不做 `field not in script_data` 判断：LLM 产不出这两个字段，
+        # 但 model_dump 会把模型默认值（duration_seconds=0 的空 song、空串 lyrics）带进
+        # script_data——按「缺席才补」判断的话条件永远为假，默认值恰好把定稿冲掉，
+        # 而这正是本段代码要防的事故。
+        if self.content_mode == "mv":
+            existing = self._load_existing_script(episode)
+            for field in ("song", "lyrics"):
+                if field in existing:
+                    script_data[field] = existing[field]
+
         # 经写盘统一入口保存：整集生成无「改前」，按严格结构校验（等价原 response_schema 的
         # Pydantic 校验），并继承 metadata 重算、加锁、filename↔episode 一致性与 project.json
         # 同步——消除「裸 json.dump 旁路」，使 _write_script_unlocked 成为剧本唯一写入点。
@@ -459,6 +469,104 @@ class ScriptGenerator:
             supported = self._resolve_supported_durations(caps, gen_mode=gen_mode)
             schema = build_episode_script_model("ad", supported)
         return self._build_ad_prompt(episode, gen_mode, supported), schema
+
+    async def _compose_mv(self, episode: int, gen_mode: str) -> tuple[str, type]:
+        """mv 分支的 (prompt, response_schema) 构造，generate/build_prompt 共用。
+
+        MV 只走 storyboard（演唱镜头要用分镜图作人物首帧再驱动口型），故恒解析
+        supported_durations——prompt 时长枚举与 schema enum 同源。
+
+        时长档位取常规视频模型与口型驱动模型的**交集**：MV 的镜头在生成时才按 ``is_performance``
+        分流到两个模型，而档位是排镜头时就定死的。只按常规模型出档位，演唱镜头会拿到 s2v 模型
+        不支持的时长，一路过完剧本审阅、到视频生成才逐个失败——那时用户已无统一纠正入口。
+        """
+        caps = await self._fetch_video_capabilities()
+        supported = self._resolve_supported_durations(caps, gen_mode=gen_mode)
+        supported = await self._narrow_to_lip_sync_durations(supported)
+        schema = build_episode_script_model("mv", supported)
+        return self._build_mv_prompt(episode, gen_mode, supported), schema
+
+    async def _narrow_to_lip_sync_durations(self, supported: list[int]) -> list[int]:
+        """把时长档位收窄到「常规视频模型 ∩ 口型驱动模型」。
+
+        口型驱动模型未配置（用户还没配、或本来就用同一个模型）时原样返回——此时演唱镜头会
+        回落到常规视频模型，两者档位本就一致，不该凭空收窄。
+
+        交集为空则 **fail loud**：这时排不出任何一个既能出片又能对口型的镜头，静默取其一
+        只是把失败推迟到视频生成，而且推迟后错误分散在每一镜上、指不回配置本身。
+        """
+        resolver = ConfigResolver(async_session_factory)
+        try:
+            lip_sync = await resolver.resolve_lip_sync_backend(self.project_json, None)
+            if not lip_sync.provider_id or not lip_sync.model_id:
+                return supported
+            lip_caps = await resolver.video_capabilities_for_model(
+                lip_sync.provider_id, lip_sync.model_id, self.project_json
+            )
+            lip_durations = [int(d) for d in (lip_caps.get("supported_durations") or [])]
+        except (ValueError, SQLAlchemyError) as exc:
+            logger.info("口型驱动模型能力解析失败，时长档位不收窄：%s", exc)
+            return supported
+
+        if not lip_durations:
+            return supported
+        both = sorted(set(supported) & set(lip_durations))
+        if not both:
+            raise ValueError(
+                f"常规视频模型的时长档位 {supported} 与口型驱动模型 "
+                f"{lip_sync.provider_id}/{lip_sync.model_id} 的 {sorted(lip_durations)} 没有交集，"
+                "排不出既能出片又能对口型的镜头：请在设置页把两者换成档位有重叠的模型"
+            )
+        return both
+
+    def _build_mv_prompt(self, episode: int, gen_mode: str, supported: list[int] | None) -> str:
+        """构建 MV prompt：歌曲段落表 + 歌词 + 素材名单，不读 step1 中间文件。
+
+        song / lyrics 取自**已有剧本顶层**而非 project.json——歌曲是这一集镜头表的时间轴
+        依据，与剧本同生共死。剧本尚不存在（首次生成）时读到空 song，由 build_mv_prompt
+        拒绝并提示先作曲。
+        """
+        existing = self._load_existing_script(episode)
+        song = existing.get("song")
+        song = song if isinstance(song, dict) else {}
+        lyrics = existing.get("lyrics")
+
+        characters = self.project_json.get("characters")
+        characters = characters if isinstance(characters, dict) else {}
+        scenes = self.project_json.get("scenes")
+        scenes = scenes if isinstance(scenes, dict) else {}
+        props = self.project_json.get("props")
+        props = props if isinstance(props, dict) else {}
+        overview = self.project_json.get("overview")
+        overview = overview if isinstance(overview, dict) else {}
+
+        return build_mv_prompt(
+            project_overview=overview,
+            style=self.project_json.get("style") or "",
+            style_description=self.project_json.get("style_description") or "",
+            characters=characters,
+            scenes=scenes,
+            props=props,
+            song=song,
+            lyrics=lyrics if isinstance(lyrics, str) else "",
+            generation_mode=gen_mode,
+            supported_durations=supported,
+            episode=episode,
+            aspect_ratio=self._resolve_aspect_ratio(),
+            target_language=self.project_json.get("source_language") or "中文",
+        )
+
+    def _load_existing_script(self, episode: int) -> dict:
+        """读该集已有剧本；不存在或损坏时返回空 dict（首次生成的正常路径）。
+
+        直接读盘而不经 ProjectManager：这里只要 song / lyrics 两个顶层字段，
+        走完整加载会带上结构校验，而首次生成时文件本就不存在。
+        """
+        path = self.project_path / "scripts" / f"episode_{episode}.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
 
     def _build_ad_prompt(self, episode: int, gen_mode: str, supported: list[int] | None) -> str:
         """构建广告/短片模式 prompt：brief + 产品信息 + 审定配比表，不读 step1 中间文件。
@@ -511,9 +619,17 @@ class ScriptGenerator:
         """
         gen_mode = self._effective_generation_mode(episode)
 
-        # 见 generate() 同位置说明：ad 先于 generation_mode 分派，且不读 step1。
+        # 见 generate() 同位置说明：ad / mv 先于 generation_mode 分派，且不读 step1。
+        # 两个分支必须与 generate() 一一对应——dry_run 预览走的是本方法，少一个分支就会让
+        # 预览出的 prompt 与实际生成用的不是同一个（mv 会预览成 drama step2 的 prompt）。
         if self.content_mode == "ad":
             prompt, _schema = await self._compose_ad(episode, gen_mode)
+            return prompt
+        if self.content_mode == "mv":
+            prompt, _schema = await self._compose_mv(episode, gen_mode)
+            return prompt
+        if self.content_mode == "mv":
+            prompt, _schema = await self._compose_mv(episode, gen_mode)
             return prompt
 
         # drama（storyboard / grid）dry-run 走 step2 视觉层 prompt：读 step1 结构化内容并渲染
@@ -898,10 +1014,12 @@ class ScriptGenerator:
             if not (isinstance(title, str) and title.strip()):
                 data["title"] = f"第{episode}集"
 
-        # 校验模型经规范解析定骨架种类（ad→shots 骨架唯一，reference→video_units），
-        # kind→模型映射留本地（模型属上层依赖，不进 SKELETONS 窄表）。
+        # 校验模型经规范解析定骨架种类（ad→shots 骨架唯一，reference→video_units），再按
+        # content_mode 收窄——ad 与 mv 同骨架不同字段。kind→模型这张表与结构校验侧共用
+        # （model_for_kind），各写一份的话 MV 会被拿去校验 AdEpisodeScript：7 条字段错误、
+        # 静默回落原始数据，校验对 MV 恒为空转。
         kind = resolve_declared_kind(self.content_mode, self._effective_generation_mode(episode))
-        schema = _KIND_PARSE_SCHEMA[kind]
+        schema = model_for_kind(kind, self.content_mode)
         try:
             return schema.model_validate(data).model_dump()
         except ValidationError as e:
@@ -1002,7 +1120,7 @@ class ScriptGenerator:
         # ad 剧本骨架唯一、不携带"视频来源"维度：不打 generation_mode 戳——按剧本级
         # generation_mode 分派的消费方（StatusCalculator / enqueue 判别等）会被该戳
         # 误导去找不存在的 video_units。
-        if self.content_mode != "ad" and gen_mode == "reference_video":
+        if self.content_mode not in NO_STEP1_CONTENT_MODES and gen_mode == "reference_video":
             script_data["content_mode"] = self.content_mode
             script_data["generation_mode"] = "reference_video"
         else:
@@ -1010,8 +1128,9 @@ class ScriptGenerator:
 
         # 集级钩子/下集预告：分集账本是钩子设计的单一真相源，强制以账本值覆盖
         # （LLM 不参与填写，model_dump 只会留下 None 默认值）。账本无规划数据时为 None。
-        # ad 恒单集、无分集账本概念，剧本模型也不持有这两个字段，跳过注入。
-        if self.content_mode != "ad":
+        # 恒单集的模式（ad / mv）无分集账本概念，剧本模型也不持有这两个字段，跳过注入——
+        # 否则会往剧本 JSON 里写两个恒为 null 的死字段（模型忽略多余键，不报错，故只能靠这道判断）。
+        if self.content_mode not in ProjectManager.SINGLE_EPISODE_MODES:
             entry = self._episode_entry(ep)
             script_data["hook"] = entry.get("hook")
             script_data["next_episode_teaser"] = self._entry_outline(entry).get("next_episode_teaser")

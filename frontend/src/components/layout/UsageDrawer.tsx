@@ -5,6 +5,7 @@ import {
   Video,
   FileText,
   AudioLines,
+  Music,
   AlertCircle,
   DollarSign,
   ChevronLeft,
@@ -34,13 +35,18 @@ const TYPE_TONE: Record<CallType, { color: string; label: string }> = {
   text: { color: "oklch(0.78 0.10 155)", label: "text_type_label" },
   image: { color: "oklch(0.80 0.10 230)", label: "image_type_label" },
   audio: { color: "oklch(0.80 0.11 75)", label: "audio_type_label" },
+  music: { color: "oklch(0.79 0.12 20)", label: "music_type_label" },
 };
+
+//: 汇总栏与明细行共用的分类顺序。与后端 lib/providers.py::CallType 同源。
+const CALL_TYPES: CallType[] = ["image", "video", "text", "audio", "music"];
 
 const TYPE_ICON: Record<CallType, typeof Image> = {
   video: Video,
   text: FileText,
   image: Image,
   audio: AudioLines,
+  music: Music,
 };
 
 export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDrawerProps) {
@@ -181,26 +187,19 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
           }
           accent
         />
-        <StatBlock
-          label={t("image_type_label")}
-          value={String(stats?.image_count ?? 0)}
-          icon={<Image className="h-3 w-3" style={{ color: TYPE_TONE.image.color }} />}
-        />
-        <StatBlock
-          label={t("video_type_label")}
-          value={String(stats?.video_count ?? 0)}
-          icon={<Video className="h-3 w-3" style={{ color: TYPE_TONE.video.color }} />}
-        />
-        <StatBlock
-          label={t("text_type_label")}
-          value={String(stats?.text_count ?? 0)}
-          icon={<FileText className="h-3 w-3" style={{ color: TYPE_TONE.text.color }} />}
-        />
-        <StatBlock
-          label={t("audio_type_label")}
-          value={String(stats?.audio_count ?? 0)}
-          icon={<AudioLines className="h-3 w-3" style={{ color: TYPE_TONE.audio.color }} />}
-        />
+        {/* 分类块由 CallType 驱动，不逐个手写：漏一种的表现是「总数含它、分类栏没有」，
+            汇总静默少报且没有任何一栏显示为 0 来提示。图标与配色取自同一张 TYPE_* 表。 */}
+        {CALL_TYPES.map((callType) => {
+          const TypeIcon = TYPE_ICON[callType];
+          return (
+            <StatBlock
+              key={callType}
+              label={t(TYPE_TONE[callType].label)}
+              value={String(stats?.[`${callType}_count`] ?? 0)}
+              icon={<TypeIcon className="h-3 w-3" style={{ color: TYPE_TONE[callType].color }} />}
+            />
+          );
+        })}
         <StatBlock
           label={t("failed_type_label")}
           value={String(stats?.failed_count ?? 0)}

@@ -15,11 +15,15 @@ PROVIDER_KLING = "kling"
 PROVIDER_AGNES = "agnes"
 PROVIDER_ANTHROPIC = "anthropic"
 
-CallType = Literal["image", "video", "text", "audio"]
+# 记账通道。music 与 audio 分列而非合并：计费维度不同——TTS 按合成字符数计价，
+# 作曲 / 歌声按产出时长计价。合并会让音乐走「字符数 / 万 × 单价」，而音乐没有字符数，
+# 费用恒为 0——记了行却记不出钱，比不记更难发现。
+CallType = Literal["image", "video", "text", "audio", "music"]
 CALL_TYPE_IMAGE: CallType = "image"
 CALL_TYPE_VIDEO: CallType = "video"
 CALL_TYPE_TEXT: CallType = "text"
 CALL_TYPE_AUDIO: CallType = "audio"
+CALL_TYPE_MUSIC: CallType = "music"
 
 
 def require_provider_pair(kind: str, backend: object | None, provider_id: str | None) -> None:

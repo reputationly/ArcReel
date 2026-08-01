@@ -1091,10 +1091,27 @@ class TestScriptGeneratorSkeletonExhaustiveness:
     """
 
     def test_parse_schema_covers_every_skeleton_kind(self):
-        from lib.script_generator import _KIND_PARSE_SCHEMA
-        from lib.script_skeleton import SKELETONS
+        """响应解析的 kind→模型表与结构校验共用一张（model_for_kind）。
 
-        assert set(_KIND_PARSE_SCHEMA) == set(SKELETONS)
+        曾各写一份：校验侧认 mv、生成侧不认，于是 MV 的 LLM 响应被拿去校验 AdEpisodeScript，
+        7 条字段错误后静默回落原始数据——校验对 MV 恒为空转，只留一条指不到真因的 warning。
+        """
+        from lib.script_skeleton import SKELETONS
+        from lib.script_structure_validator import _KIND_MODEL, model_for_kind
+
+        assert set(_KIND_MODEL) == set(SKELETONS)
+        # 同骨架、不同 content_mode 必须选出不同模型
+        assert model_for_kind("shots", "ad").__name__ == "AdEpisodeScript"
+        assert model_for_kind("shots", "mv").__name__ == "MVEpisodeScript"
+
+    def test_generator_selects_the_parse_model_by_content_mode(self):
+        """守连接点：生成器必须把 content_mode 传进去，只传 kind 等于回到旧的错配。"""
+        import inspect
+
+        from lib.script_generator import ScriptGenerator
+
+        src = inspect.getsource(ScriptGenerator._parse_response)
+        assert "model_for_kind(kind, self.content_mode)" in src
 
     def test_metadata_count_key_covers_every_skeleton_kind(self):
         from lib.script_generator import _METADATA_COUNT_KEY

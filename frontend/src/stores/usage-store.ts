@@ -14,6 +14,7 @@ export interface UsageStats {
   video_count: number;
   text_count: number;
   audio_count: number;
+  music_count: number;
   failed_count: number;
   total_count: number;
 }

@@ -23,7 +23,9 @@ from server.agent_runtime.sdk_tools.enqueue_assets import (
 )
 from server.agent_runtime.sdk_tools.enqueue_grid import generate_grid_tool
 from server.agent_runtime.sdk_tools.enqueue_image_edits import edit_images_tool
+from server.agent_runtime.sdk_tools.enqueue_music import generate_music_tool
 from server.agent_runtime.sdk_tools.enqueue_narration_audio import generate_narration_audio_tool
+from server.agent_runtime.sdk_tools.enqueue_singing import generate_singing_tool
 from server.agent_runtime.sdk_tools.enqueue_storyboards import generate_storyboards_tool
 from server.agent_runtime.sdk_tools.enqueue_videos import (
     generate_video_all_tool,
@@ -43,6 +45,7 @@ from server.agent_runtime.sdk_tools.patch_script import (
     remove_segment_tool,
     split_segment_tool,
 )
+from server.agent_runtime.sdk_tools.patch_song import patch_song_tool
 from server.agent_runtime.sdk_tools.text_generation import (
     confirm_script_review_tool,
     generate_episode_script_tool,
@@ -72,6 +75,8 @@ ARCREEL_MCP_TOOL_IDS: tuple[str, ...] = (
     "generate_video_all",
     "generate_video_selected",
     "generate_narration_audio",
+    "generate_music",
+    "generate_singing",
     "generate_episode_script",
     "confirm_script_review",
     "normalize_drama_script",
@@ -82,6 +87,7 @@ ARCREEL_MCP_TOOL_IDS: tuple[str, ...] = (
     "reset_episode_planning",
     "patch_episode_script",
     "patch_episode_meta",
+    "patch_song",
     "insert_segment",
     "remove_segment",
     "split_segment",
@@ -106,6 +112,8 @@ def build_arcreel_mcp_server(*, project_name: str, projects_root: Path) -> Any:
             generate_video_all_tool(ctx),
             generate_video_selected_tool(ctx),
             generate_narration_audio_tool(ctx),
+            generate_music_tool(ctx),
+            generate_singing_tool(ctx),
             generate_episode_script_tool(ctx),
             confirm_script_review_tool(ctx),
             normalize_drama_script_tool(ctx),
@@ -116,6 +124,7 @@ def build_arcreel_mcp_server(*, project_name: str, projects_root: Path) -> Any:
             reset_episode_planning_tool(ctx),
             patch_episode_script_tool(ctx),
             patch_episode_meta_tool(ctx),
+            patch_song_tool(ctx),
             insert_segment_tool(ctx),
             remove_segment_tool(ctx),
             split_segment_tool(ctx),

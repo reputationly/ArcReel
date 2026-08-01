@@ -56,6 +56,8 @@ class _OptionsDict(TypedDict):
     image_backends: list[str]
     text_backends: list[str]
     audio_backends: list[str]
+    music_backends: list[str]
+    singing_backends: list[str]
     provider_names: dict[str, str]
 
 
@@ -135,7 +137,12 @@ async def _build_options(svc: ConfigService, session: AsyncSession) -> _OptionsD
         "video_backends": [],
         "image_backends": [],
         "text_backends": [],
+        # audio 桶按能力再分三份：media_type="audio" 底下装着互不兼容的协议（TTS 只有
+        # synthesize、作曲只有 generate_music、歌声只有 synthesize_singing）。共用一个列表
+        # 会让三个下拉框互相提供对方用不了的模型，配错要到执行期才炸成 AttributeError。
         "audio_backends": [],
+        "music_backends": [],
+        "singing_backends": [],
     }
     provider_names: dict[str, str] = {}
     _MEDIA_TO_BUCKET = {
@@ -153,9 +160,18 @@ async def _build_options(svc: ConfigService, session: AsyncSession) -> _OptionsD
             if bucket:
                 buckets[bucket].append(f"{provider_id}/{model_id}")
 
+    from lib.audio_backends.base import AudioCapability
     from lib.custom_provider import make_provider_id
-    from lib.custom_provider.endpoints import endpoint_to_media_type
+    from lib.custom_provider.endpoints import endpoint_supports_audio_capability, endpoint_to_media_type
     from lib.db.repositories.custom_provider_repo import CustomProviderRepository
+
+    #: 音频能力 → 选项桶。registry 内置 provider 的模型不带 endpoint 信息，一律归 TTS 桶
+    #: （PROVIDER_REGISTRY 目前没有音乐类模型；有了要同步这里）。
+    _AUDIO_CAP_TO_BUCKET = (
+        (AudioCapability.TEXT_TO_SPEECH, "audio_backends"),
+        (AudioCapability.TEXT_TO_MUSIC, "music_backends"),
+        (AudioCapability.SINGING_SYNTHESIS, "singing_backends"),
+    )
 
     try:
         repo = CustomProviderRepository(session)
@@ -165,9 +181,16 @@ async def _build_options(svc: ConfigService, session: AsyncSession) -> _OptionsD
         for model in enabled_models:
             pid = make_provider_id(model.provider_id)
             media_type = endpoint_to_media_type(model.endpoint)
-            bucket = _MEDIA_TO_BUCKET.get(media_type)
-            if bucket:
-                buckets[bucket].append(f"{pid}/{model.model_id}")
+            entry = f"{pid}/{model.model_id}"
+            if media_type == "audio":
+                # 一个 endpoint 可能同时具备多种能力（newapi-music 既作曲也唱），进多个桶
+                for capability, bucket_key in _AUDIO_CAP_TO_BUCKET:
+                    if endpoint_supports_audio_capability(model.endpoint, capability):
+                        buckets[bucket_key].append(entry)
+            else:
+                bucket = _MEDIA_TO_BUCKET.get(media_type)
+                if bucket:
+                    buckets[bucket].append(entry)
             if pid not in provider_names and model.provider_id in provider_name_map:
                 provider_names[pid] = provider_name_map[model.provider_id]
     except Exception:
@@ -188,6 +211,13 @@ class SystemConfigPatchRequest(BaseModel):
     default_image_backend_i2i: str | None = None
     default_text_backend: str | None = None
     default_audio_backend: str | None = None
+    # 作曲与歌声合成各配一个：ACE-Step 只会作曲、SoulX-Singer 只会唱，共用一项会把
+    # 请求发给不会那件事的模型（调用侧拦不住——同一 backend 类承载两种能力）。
+    default_music_backend: str | None = None
+    default_singing_backend: str | None = None
+    # 口型驱动（数字人 s2v）模型。与常规视频模型分列：普通图生视频模型没有 s2v 能力，
+    # 共用一项会让 MV 演唱镜头照常出片但口型对不上。
+    default_lip_sync_backend: str | None = None
     narration_voice: str | None = None
     narration_speed: float | None = None
     video_generate_audio: bool | None = None
@@ -275,6 +305,9 @@ async def get_system_config(
         "default_image_backend_i2i": all_s.get("default_image_backend_i2i", ""),
         "default_text_backend": all_s.get("default_text_backend", ""),
         "default_audio_backend": all_s.get("default_audio_backend", ""),
+        "default_music_backend": all_s.get("default_music_backend", ""),
+        "default_singing_backend": all_s.get("default_singing_backend", ""),
+        "default_lip_sync_backend": all_s.get("default_lip_sync_backend", ""),
         "narration_voice": all_s.get("narration_voice", ""),
         "narration_speed": narration_speed,
         "video_generate_audio": video_generate_audio,
@@ -360,6 +393,9 @@ async def patch_system_config(
         "default_image_backend_i2i",
         "default_text_backend",
         "default_audio_backend",
+        "default_music_backend",
+        "default_singing_backend",
+        "default_lip_sync_backend",
         "text_backend_simple",
         "text_backend_complex",
     ):

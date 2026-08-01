@@ -6,15 +6,12 @@ import { ShotSplitView } from "./ShotSplitView";
 import { EpisodeHeader } from "./EpisodeHeader";
 import { useCostStore } from "@/stores/cost-store";
 import { useActiveResourceIds } from "@/stores/tasks-store";
-import { getScriptItemId } from "@/utils/script-shape";
+import { getScriptItemId, getScriptItems } from "@/utils/script-shape";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import type { DurationOutOfRangeReason } from "@/hooks/useModelCapabilities";
 import type {
   EpisodeScript,
-  NarrationEpisodeScript,
-  DramaEpisodeScript,
-  AdEpisodeScript,
   NarrationSegment,
   DramaScene,
   AdShot,
@@ -92,14 +89,21 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
 
   const { t } = useTranslation("dashboard");
   const contentMode = projectData?.content_mode ?? "narration";
-  // 分镜编辑子视图按剧本形状显式分派：narration（segments）/ drama（scenes）/ ad（shots）。
+  // 分镜编辑子视图按剧本形状显式分派：narration（segments）/ drama（scenes）/ ad、mv（shots）。
   // 未知/脏 content_mode 沿用历史兜底落 drama 视图。
-  const editorContentMode: "narration" | "drama" | "ad" =
-    contentMode === "narration" ? "narration" : contentMode === "ad" ? "ad" : "drama";
+  const editorContentMode: "narration" | "drama" | "ad" | "mv" =
+    contentMode === "narration"
+      ? "narration"
+      : contentMode === "ad"
+        ? "ad"
+        : contentMode === "mv"
+          ? "mv"
+          : "drama";
 
   const hasScript = Boolean(episodeScript);
   // ad 一键生成不走预处理中间文件，预处理 tab 对 ad 无意义，仅 timeline 单 tab
-  const showTabs = Boolean(hasDraft) && editorContentMode !== "ad";
+  // ad / mv 都是一键生成、不走预处理中间文件，预处理 tab 对它们无意义
+  const showTabs = Boolean(hasDraft) && editorContentMode !== "ad" && editorContentMode !== "mv";
   const defaultTab = hasScript ? "timeline" : "preprocessing";
   const [activeTab, setActiveTab] = useState<"preprocessing" | "timeline">(defaultTab);
 
@@ -130,20 +134,12 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
   const aspectRatio: "9:16" | "16:9" =
     rawAspect === "9:16" || rawAspect === "16:9" ? rawAspect : "16:9";
 
-  // 仅三种已注册模式显式取数；未知/脏 content_mode 返回空列表（不渲染可编辑视图）——
-  // 否则会以 drama 形状渲染、保存却按真实 content_mode 分派到错误端点。
+  // 取数走 script-shape 的单一实现（已注册模式取对应数组，未注册返回空列表——不以其他
+  // 模式的形状渲染，否则保存会按真实 content_mode 分派到错误端点）。这里曾内联一份三分支
+  // 副本，新增 mv 时漏改导致 MV 时间轴恒为空：取数只该有一处。
   const segments = useMemo<Segment[]>(
-    () =>
-      !episodeScript || !projectData
-        ? []
-        : contentMode === "narration"
-          ? ((episodeScript as NarrationEpisodeScript).segments ?? [])
-          : contentMode === "ad"
-            ? ((episodeScript as AdEpisodeScript).shots ?? [])
-            : contentMode === "drama"
-              ? ((episodeScript as DramaEpisodeScript).scenes ?? [])
-              : [],
-    [contentMode, episodeScript, projectData],
+    () => (!episodeScript || !projectData ? [] : (getScriptItems(episodeScript, editorContentMode) as Segment[])),
+    [editorContentMode, episodeScript, projectData],
   );
 
   // 任务派生 loading：活跃 + 最新行胜出下沉到 store selector（各 task_type 一组活跃 resource）
@@ -327,7 +323,10 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
         className="min-h-0 flex-1 overflow-hidden"
         data-onboarding={ONBOARDING_ANCHORS.workbenchTimeline}
       >
-        {activeTab === "preprocessing" && hasDraft && editorContentMode !== "ad" ? (
+        {activeTab === "preprocessing" &&
+        hasDraft &&
+        editorContentMode !== "ad" &&
+        editorContentMode !== "mv" ? (
           <div className="h-full overflow-y-auto p-4">
             <ScriptReviewGate
               key={`${projectName}:${episode}`}

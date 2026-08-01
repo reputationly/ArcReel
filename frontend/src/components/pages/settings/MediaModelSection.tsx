@@ -131,6 +131,8 @@ export function MediaModelSection() {
   const imageBackends: string[] = options.image_backends ?? [];
   const textBackends: string[] = options.text_backends ?? [];
   const audioBackends: string[] = options.audio_backends ?? [];
+  const musicBackends: string[] = options.music_backends ?? [];
+  const singingBackends: string[] = options.singing_backends ?? [];
 
   const currentVideo = draft.default_video_backend ?? settings.default_video_backend ?? "";
   const currentImageT2I =
@@ -160,6 +162,9 @@ export function MediaModelSection() {
 
   const renderVideoOptionMeta = videoOptionMetaRenderer({ t, providers, customProviders, endpointToMediaType });
   const currentAudioBackend = draft.default_audio_backend ?? settings.default_audio_backend ?? "";
+  const currentMusicBackend = draft.default_music_backend ?? settings.default_music_backend ?? "";
+  const currentLipSyncBackend = draft.default_lip_sync_backend ?? settings.default_lip_sync_backend ?? "";
+  const currentSingingBackend = draft.default_singing_backend ?? settings.default_singing_backend ?? "";
   const currentNarrationVoice = draft.narration_voice ?? settings.narration_voice ?? "";
   const currentNarrationSpeed =
     "narration_speed" in draft ? draft.narration_speed : settings.narration_speed;
@@ -242,6 +247,30 @@ export function MediaModelSection() {
             <span className="text-[11px] text-text-4">{t("audio_support_hint")}</span>
           </label>
         </div>
+
+        {/* 口型驱动：MV 演唱镜头专用。普通图生视频模型没有 s2v 能力，共用一项会让
+            演唱镜头照常出片但口型对不上——看成片才发现，且看不出原因。 */}
+        {videoBackends.length > 0 && (
+          <div className="mt-4">
+            <label className="mb-1.5 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-4">
+              {t("default_lip_sync_model")}
+            </label>
+            {/* 空值语义与旁白 TTS 不同：那边留空会自动推断 provider，这三个（作曲/歌声/口型）
+                的解析器刻意不推断——配了 key 不代表部署了对应模型。标成「自动选择」等于
+                引导用户留空、然后在生成时撞「尚未配置」。 */}
+            <ProviderModelSelect
+              value={currentLipSyncBackend}
+              options={videoBackends}
+              providerNames={allProviderNames}
+              onChange={(v) => setDraft((prev) => ({ ...prev, default_lip_sync_backend: v }))}
+              allowDefault
+              defaultLabel={t("not_configured_option")}
+              defaultHint={t("not_configured_hint")}
+              aria-label={t("default_lip_sync_model")}
+            />
+            <p className="mt-1 text-[11px] text-text-4">{t("default_lip_sync_model_hint")}</p>
+          </div>
+        )}
 
         <div className="mt-3 flex items-start gap-2.5 text-[12.5px] text-text-2">
           <input
@@ -342,6 +371,46 @@ export function MediaModelSection() {
           />
         ) : (
           emptyHint(t("no_audio_providers_hint"))
+        )}
+
+        {/* 作曲与歌声：与旁白 TTS 同属 audio 通道（共用并发额度），但各是不同协议——
+            ACE-Step 只会作曲、SoulX-Singer 只会唱、TTS 只会念。选项按 endpoint 声明的能力
+            分列，互不串台（后端 _AUDIO_CAP_TO_BUCKET 定分桶）。 */}
+        {(musicBackends.length > 0 || singingBackends.length > 0) && (
+          <div className="mt-4 space-y-3.5">
+            <div>
+              <label className="mb-1.5 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-4">
+                {t("default_music_model")}
+              </label>
+              <ProviderModelSelect
+                value={currentMusicBackend}
+                options={musicBackends}
+                providerNames={allProviderNames}
+                onChange={(v) => setDraft((prev) => ({ ...prev, default_music_backend: v }))}
+                allowDefault
+                defaultLabel={t("not_configured_option")}
+                defaultHint={t("not_configured_hint")}
+                aria-label={t("default_music_model")}
+              />
+              <p className="mt-1 text-[11px] text-text-4">{t("default_music_model_hint")}</p>
+            </div>
+            <div>
+              <label className="mb-1.5 block font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-text-4">
+                {t("default_singing_model")}
+              </label>
+              <ProviderModelSelect
+                value={currentSingingBackend}
+                options={singingBackends}
+                providerNames={allProviderNames}
+                onChange={(v) => setDraft((prev) => ({ ...prev, default_singing_backend: v }))}
+                allowDefault
+                defaultLabel={t("not_configured_option")}
+                defaultHint={t("not_configured_hint")}
+                aria-label={t("default_singing_model")}
+              />
+              <p className="mt-1 text-[11px] text-text-4">{t("default_singing_model_hint")}</p>
+            </div>
+          </div>
         )}
 
         <div className="mt-4 space-y-3.5">

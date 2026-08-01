@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
+from lib.lip_sync import task_is_lip_sync
 from lib.project_change_hints import project_change_source
 from server.services.generation_context import VideoLaneRequest, resolve_generation_context
 from server.services.generation_tasks import (
@@ -55,12 +56,18 @@ async def execute_resume_video_task(task: dict[str, Any], *, job_id: str) -> dic
     # 仅声明 video lane：resume 路径用不到 image backend，不声明 image lane 即不构造它——
     # 若 image 配置在 submit→重启之间被破坏，整段 resume 不该被无关检查弄失败（provider
     # job 仍在跑）。provider/backend 身份解析收口于 GenerationContext（docs/adr/0049）。
+    #
+    # 口型驱动镜头（MV 演唱镜）与普通镜同为 task_type="video" 却走另一个模型，判据与入队派生、
+    # worker 限流、执行层同源（见 lib/lip_sync.py）。这里不跟着分流的话，自建网关上口型模型与
+    # 视频模型常挂在同一个 provider 下——provider 锁对了、model 仍解析成常规视频模型，记账与
+    # 日志记的是一个这次根本没调用的模型。
+    is_lip_sync = await asyncio.to_thread(task_is_lip_sync, project_name, project, payload, resource_id)
     ctx = await resolve_generation_context(
         project_name,
         payload,
         project=project,
         user_id=user_id,
-        video=VideoLaneRequest(),
+        video=VideoLaneRequest(lip_sync=is_lip_sync),
     )
     generator = ctx.generator
 

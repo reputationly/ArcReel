@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { getProjectDisplayName } from "@/utils/project-display";
+import { contentModeTag } from "@/utils/content-mode";
 
 /**
  * 顶栏左上的项目切换菜单。
@@ -41,7 +42,7 @@ export function ProjectMenu() {
     typeof currentProjectData?.aspect_ratio === "string"
       ? currentProjectData.aspect_ratio
       : currentProjectData?.aspect_ratio?.storyboard;
-  const modeLabel = contentMode === "drama" ? "DRAMA" : contentMode === "ad" ? "AD" : "NARRATION";
+  const modeLabel = contentModeTag(contentMode);
   const modeTagline = aspectRatio ? `${modeLabel} · ${aspectRatio}` : modeLabel;
 
   return (

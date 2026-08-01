@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from lib.audio_backends.base import AudioCapability, MusicBackend
+from lib.audio_backends.newapi_music import NewAPIMusicBackend
 from lib.audio_backends.openai import OpenAIAudioBackend
 from lib.config.url_utils import ensure_google_base_url, ensure_openai_base_url
 from lib.custom_provider.backends import (
@@ -57,11 +59,16 @@ class EndpointSpec:
     display_name_key: str  # 前端 i18n key（dashboard ns）
     request_method: str  # "POST"
     request_path_template: str  # "/v1/chat/completions"，可含 {model} 等占位
+    # MusicBackend 不套 Custom*Backend 包装层（那层是 TTS 的记账形状），故单列于联合类型。
     build_backend: Callable[
         [CustomProvider, str],
-        CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend,
+        CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend | MusicBackend,
     ]
     image_capabilities: frozenset[ImageCapability] | None = None  # image 类才填，非 image 类省略
+    # audio 类才填。media_type="audio" 这一个桶下面装着互不兼容的协议：TTS 只有 synthesize、
+    # 作曲只有 generate_music、歌声只有 synthesize_singing。只按 media_type 分类会让三种模型
+    # 在设置页混进同一个下拉框，配错的表现是执行期 AttributeError——错误信息里看不出是配错了模型。
+    audio_capabilities: frozenset[AudioCapability] | None = None
     # 参考生视频单镜头参考图上限；仅 video 类有意义。
     # 显式 int：原样下传作为硬约束（0 表示不接受参考图，executor 据此将 references 裁剪为 0 张）。
     # None：未声明 —— 一个 endpoint 多 model、容量不同时 endpoint 维度给不出准数，由 resolver
@@ -155,6 +162,21 @@ def _build_newapi_video(provider, model_id: str) -> CustomVideoBackend:
         raise ValueError("NewAPI 视频后端需要 base_url")
     delegate = NewAPIVideoBackend(api_key=provider.api_key, base_url=base_url, model=model_id)
     return CustomVideoBackend(provider_id=provider.provider_id, delegate=delegate, model=model_id)
+
+
+def _build_newapi_music(provider, model_id: str):
+    """音乐后端不套 CustomAudioBackend：那层是 TTS 的记账包装（AudioSynthesisResult），
+    音乐走 MusicGenerationResult，形状不同。归因经 provider_name 直接传给 backend。
+    """
+    base_url = ensure_openai_base_url(provider.base_url)
+    if not base_url:
+        raise ValueError("NewAPI 音乐后端需要 base_url")
+    return NewAPIMusicBackend(
+        api_key=provider.api_key,
+        base_url=base_url,
+        model=model_id,
+        provider_name=provider.provider_id,
+    )
 
 
 def _ensure_url_path_suffix(base_url: str | None, suffix: str) -> str | None:
@@ -318,6 +340,20 @@ ENDPOINT_REGISTRY: dict[str, EndpointSpec] = {
         video_caps_for_model=NewAPIVideoBackend.video_capabilities_for_model,
         end_image_capable=True,
     ),
+    "newapi-music": EndpointSpec(
+        key="newapi-music",
+        media_type="audio",
+        # 同一个 backend 承载两种能力，靠 metadata.task_type 区分（t2m / svs）；
+        # 具体某个 model 只会其中之一（ACE-Step 只作曲、SoulX-Singer 只唱），endpoint 维度
+        # 给不出准数，故两者都声明——这里把关的是「不会被误当成 TTS」。
+        audio_capabilities=frozenset({AudioCapability.TEXT_TO_MUSIC, AudioCapability.SINGING_SYNTHESIS}),
+        family="newapi",
+        display_name_key="endpoint_newapi_music_display",
+        request_method="POST",
+        # 与视频同一个异步任务端点：音乐靠 model + metadata.task_type 区分，不是独立路由。
+        request_path_template="/v1/video/generations",
+        build_backend=_build_newapi_music,
+    ),
     "v2-video-generations": EndpointSpec(
         key="v2-video-generations",
         media_type="video",
@@ -367,6 +403,7 @@ ENDPOINT_REGISTRY: dict[str, EndpointSpec] = {
     "openai-tts": EndpointSpec(
         key="openai-tts",
         media_type="audio",
+        audio_capabilities=frozenset({AudioCapability.TEXT_TO_SPEECH}),
         family="openai",
         display_name_key="endpoint_openai_tts_display",
         request_method="POST",
@@ -479,7 +516,22 @@ def _validate_video_caps_declarations() -> None:
             )
 
 
+def _validate_audio_caps_declarations() -> None:
+    """import 期校验：每个 audio endpoint 必须声明非空 audio_capabilities，非 audio 类不得声明。
+
+    漏声明的后果不是报错而是静默错分类——该 endpoint 会同时缺席三个音频选项列表（旁白 / 作曲 /
+    歌声），用户在设置页看不到自己刚配好的模型，且没有任何提示指向漏声明这件事。
+    """
+    for key, spec in ENDPOINT_REGISTRY.items():
+        if spec.media_type == "audio":
+            if not spec.audio_capabilities:
+                raise ValueError(f"audio endpoint {key!r} must declare a non-empty audio_capabilities")
+        elif spec.audio_capabilities is not None:
+            raise ValueError(f"non-audio endpoint {key!r} must not declare audio_capabilities")
+
+
 _validate_video_caps_declarations()
+_validate_audio_caps_declarations()
 
 
 # ── 工具函数 ───────────────────────────────────────────────────────
@@ -494,6 +546,23 @@ def get_endpoint_spec(endpoint: str) -> EndpointSpec:
 
 def endpoint_to_media_type(endpoint: str) -> str:
     return get_endpoint_spec(endpoint).media_type
+
+
+def endpoint_to_audio_capabilities(endpoint: str) -> frozenset[AudioCapability]:
+    """返回 audio 类 endpoint 的 capability 集合。非 audio 类抛 ValueError。"""
+    spec = get_endpoint_spec(endpoint)
+    if spec.audio_capabilities is None:
+        raise ValueError(f"endpoint {endpoint!r} is not an audio endpoint")
+    return spec.audio_capabilities
+
+
+def endpoint_supports_audio_capability(endpoint: str, capability: AudioCapability) -> bool:
+    """该 endpoint 是否具备指定音频能力；非 audio 类 endpoint 返回 False（不抛）。
+
+    供选项列表按能力分桶用——遍历所有 endpoint 时不该为非 audio 类中断。
+    """
+    spec = ENDPOINT_REGISTRY.get(endpoint)
+    return spec is not None and spec.audio_capabilities is not None and capability in spec.audio_capabilities
 
 
 def endpoint_to_image_capabilities(endpoint: str) -> frozenset[ImageCapability]:

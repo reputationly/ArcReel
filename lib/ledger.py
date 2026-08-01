@@ -40,8 +40,9 @@ logger = logging.getLogger(__name__)
 def _settlement_from_result(call_type: CallType, result: Any, *, service_tier: str = "default") -> SettlementInput:
     """成功通道 union 分发：按 call_type 从 backend 结果对象提取计费维度。
 
-    两处语义转写的唯一落点：
+    三处语义转写的唯一落点：
     - audio 的 ``characters``（合成字符数）→ ``usage_tokens``（驱动 per-character 计费）；
+    - music 的 ``duration_seconds``（回包实测曲长）→ ``billed_duration_seconds``（per-second 计费）；
     - video 的 ``duration_seconds``（backend 回报的实际计费/生成时长）→
       ``billed_duration_seconds``（覆盖 start_call 时的请求时长）。
 
@@ -58,6 +59,12 @@ def _settlement_from_result(call_type: CallType, result: Any, *, service_tier: s
         )
     if call_type == "audio":
         return SettlementInput(usage_tokens=result.characters)
+    if call_type == "music":
+        # 作曲 / 歌声按产出时长计价（回包实测值），与 TTS 的按字符计价不同口径。
+        # duration 缺报时按 None 递交，结算侧如实按 0 计——不拿申请时长近似掩盖 provider 漏报。
+        return SettlementInput(
+            billed_duration_seconds=int(result.duration_seconds) if result.duration_seconds else None
+        )
     if call_type == "video":
         return SettlementInput(
             usage_tokens=result.usage_tokens,

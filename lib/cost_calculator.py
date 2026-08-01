@@ -138,6 +138,10 @@ class CostCalculator:
             return price_input, cur
         elif call_type == "video":
             return (duration_seconds or 8) * price_input, cur
+        elif call_type == "music":
+            # 作曲 / 歌声按产出时长计价（与 video 同形状、不同通道）。缺时长按 0 计，
+            # 不像 video 那样兜底 8 秒——曲长差异极大，兜底值会给出一个凭空的金额。
+            return (duration_seconds or 0) * price_input, cur
         elif call_type == "audio":
             # usage_tokens 承载合成字符数（与 _per_character 同模式）；单价口径为每万字符，
             # 与内置 per_character pricing kind 共用同一计价单位常量。

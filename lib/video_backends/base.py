@@ -429,6 +429,11 @@ class VideoGenerationRequest:
     # 文本，后端按同一顺序下发，故任何一侧都不得重排或跳过。哪个角色对应哪段音频不进请求
     # ——绑定由 prompt 文本表达，供应商 API 均无结构化的「角色-音频」字段。
     reference_audio_files: list[Path] | None = None
+    # 驱动音频（口型同步）。与 reference_audio_files 语义不同、不可合并：参考音频是**音色**
+    # 模仿的样本（"用这个人的嗓子说话"），驱动音频是**内容**（"嘴型对上这段声音"）。
+    # 合成一个字段会让后端无从判断该模仿音色还是对口型——两者的产物完全不同。
+    # 数字人任务（InfiniteTalk s2v）由它触发：非空即走口型驱动路径。
+    driving_audio: Path | None = None
     generate_audio: bool = True
 
     # 插帧总开关（系统设置 video_frame_interpolation，默认开）。开着也只对支持插帧的

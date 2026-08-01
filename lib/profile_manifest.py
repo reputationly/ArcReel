@@ -57,8 +57,8 @@ class ProfileMisconfiguredError(RuntimeError):
     """profile 端变体文件不合法（成对缺失或与通用文件并存）→ 部署错误。sync 拒绝运行。"""
 
 
-ContentMode = Literal["narration", "drama", "ad"]
-VALID_CONTENT_MODES: frozenset[str] = frozenset({"narration", "drama", "ad"})
+ContentMode = Literal["narration", "drama", "ad", "mv"]
+VALID_CONTENT_MODES: frozenset[str] = frozenset({"narration", "drama", "ad", "mv"})
 
 
 # ---------- 基础工具 ----------

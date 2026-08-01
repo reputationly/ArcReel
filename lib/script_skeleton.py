@@ -104,14 +104,16 @@ def resolve_declared_kind(content_mode: str | None, generation_mode: str | None)
 
     输入为项目级已过校验的 content_mode 与 ``effective_mode`` 解析后的 generation_mode。
 
-    - ``ad`` → ``shots``（恒定，不随生成路径变，见 ``docs/adr/0033``）
+    - ``ad`` / ``mv`` → ``shots``（恒定，不随生成路径变，见 ``docs/adr/0033``）。两者镜头
+      形状相同（平铺数组 + ``shot_id``），差异在字段与生成逻辑，由各消费方按 content_mode
+      分派 Pydantic 模型——骨架表只描述数据形状，模型映射不入表（见模块 docstring）。
     - ``narration`` / ``drama`` + ``generation_mode == "reference_video"`` → ``video_units``
     - ``narration`` → ``segments``，``drama`` → ``scenes``
     - 未知/缺失 content_mode → 抛 ``ValueError``（fail-loud，不静默默认到 drama/narration）
 
     服务只有项目配置在手的消费方；手持可能缺字段的剧本 dict 的消费方走 ``resolve_script_kind``。
     """
-    if content_mode == "ad":
+    if content_mode in ("ad", "mv"):
         return "shots"
     if content_mode == "narration":
         return "video_units" if generation_mode == "reference_video" else "segments"
@@ -145,7 +147,7 @@ def resolve_script_kind(script: dict[str, Any]) -> str:
     if "video_units" in script and not any(k in script for k in ("segments", "scenes", "shots")):
         return "video_units"
     content_mode = script.get("content_mode")
-    if content_mode == "ad":
+    if content_mode in ("ad", "mv"):
         return "shots"
     if content_mode == "drama":
         return "scenes"

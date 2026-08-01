@@ -38,7 +38,13 @@ from lib.i18n import Translator
 from lib.json_io import domain_error_on_value_error
 from lib.profile_manifest import ContentMode
 from lib.project_change_hints import project_change_source
-from lib.project_manager import EmptySourceError, EpisodeScriptReboundError, SourceKind, get_project_manager
+from lib.project_manager import (
+    EmptySourceError,
+    EpisodeScriptReboundError,
+    ProjectManager,
+    SourceKind,
+    get_project_manager,
+)
 from lib.status_calculator import StatusCalculator
 from lib.style_templates import is_known_template, resolve_template_prompt
 from server.auth import CurrentUser, create_download_token, verify_download_token
@@ -483,15 +489,16 @@ async def create_project(
             if req.image_backend:
                 raise HTTPException(status_code=400, detail=_t("deprecated_image_backend"))
 
-            # 模式专属字段互斥：target_duration/brief 仅 ad 可用；
-            # ad 不暴露 default_duration、不开放 grid 生成模式
+            # 模式专属字段互斥：target_duration/brief 仅 ad 可用。单镜时长偏好与可用生成方式
+            # 按模式表判定（ProjectManager 单一真相源），不在此另列一份模式名单。
             content_mode = req.content_mode or "narration"
-            if content_mode == "ad":
-                if req.default_duration is not None:
-                    raise HTTPException(status_code=400, detail=_t("ad_no_default_duration"))
-                if req.generation_mode == "grid":
-                    raise HTTPException(status_code=400, detail=_t("ad_grid_not_supported"))
-            else:
+            if content_mode in ProjectManager.NO_DEFAULT_DURATION_MODES and req.default_duration is not None:
+                raise HTTPException(status_code=400, detail=_t("mode_no_default_duration"))
+            if not ProjectManager.generation_mode_supported(content_mode, req.generation_mode):
+                raise HTTPException(
+                    status_code=400, detail=_t("generation_mode_not_supported", mode=req.generation_mode)
+                )
+            if content_mode != "ad":
                 if req.target_duration is not None:
                     raise HTTPException(status_code=400, detail=_t("ad_only_field", field="target_duration"))
                 if req.brief is not None:
@@ -682,6 +689,7 @@ async def update_project(name: str, req: UpdateProjectRequest, _user: CurrentUse
             def _mutate(project: dict) -> None:
                 # 整段 read-modify-write 在单一 _project_lock 内完成，避免并发 PATCH / 任务回写丢更新
                 is_ad = project.get("content_mode") == "ad"
+                project_mode = project.get("content_mode")
                 if req.title is not None:
                     project["title"] = req.title
                 if req.style is not None:
@@ -727,17 +735,19 @@ async def update_project(name: str, req: UpdateProjectRequest, _user: CurrentUse
                 if "aspect_ratio" in req.model_fields_set and req.aspect_ratio is not None:
                     project["aspect_ratio"] = req.aspect_ratio
                 if "generation_mode" in req.model_fields_set:
-                    if is_ad and req.generation_mode == "grid":
-                        raise HTTPException(status_code=400, detail=_t("ad_grid_not_supported"))
+                    if not ProjectManager.generation_mode_supported(project_mode, req.generation_mode):
+                        raise HTTPException(
+                            status_code=400, detail=_t("generation_mode_not_supported", mode=req.generation_mode)
+                        )
                     if req.generation_mode is None:
                         project.pop("generation_mode", None)
                     else:
                         project["generation_mode"] = req.generation_mode
                 if "default_duration" in req.model_fields_set:
-                    # ad 项目对字段出现本身即拒绝（含 null）：与创建路径"禁写字段"契约一致，
-                    # 避免 null 走删除分支静默返回 200
-                    if is_ad:
-                        raise HTTPException(status_code=400, detail=_t("ad_no_default_duration"))
+                    # 不持有该字段的模式对字段出现本身即拒绝（含 null）：与创建路径"禁写字段"
+                    # 契约一致，避免 null 走删除分支静默返回 200
+                    if project_mode in ProjectManager.NO_DEFAULT_DURATION_MODES:
+                        raise HTTPException(status_code=400, detail=_t("mode_no_default_duration"))
                     if req.default_duration is None:
                         project.pop("default_duration", None)
                     else:
@@ -790,8 +800,11 @@ async def update_project(name: str, req: UpdateProjectRequest, _user: CurrentUse
                     existing_list = project.get("episodes", [])
                     patch_map: dict[int, EpisodePatch] = {}
                     for ep in req.episodes:
-                        if is_ad and ep.generation_mode == "grid":
-                            raise HTTPException(status_code=400, detail=_t("ad_grid_not_supported"))
+                        if not ProjectManager.generation_mode_supported(project_mode, ep.generation_mode):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=_t("generation_mode_not_supported", mode=ep.generation_mode),
+                            )
                         patch_map[ep.episode] = ep  # 重复编号：后者覆盖前者
 
                     new_episodes: list[dict] = []
@@ -934,45 +947,54 @@ class UpdateShotRequest(BaseModel):
     updates: dict
 
 
-# ad 镜头 PATCH 白名单：shot_id（定位键）与 generated_assets（运行时状态）不可改写。
-_SHOT_UPDATABLE_FIELDS = (
+# 镜头 PATCH 白名单：shot_id（定位键）与 generated_assets（运行时状态）不可改写。
+# ad / mv 共用 shots 骨架但一等字段不同，故按 content_mode 分表——合表会让 ad 镜头能被写入
+# start_seconds、mv 镜头能被写入 voiceover_text，落成模式外字段后各自的校验器都不认。
+_SHOT_COMMON_UPDATABLE_FIELDS = (
     "section",
-    "voiceover_text",
     "duration_seconds",
     "image_prompt",
     "video_prompt",
     "characters_in_shot",
     "scenes",
     "props",
-    "products_in_shot",
     "transition_to_next",
     "note",
 )
+_SHOT_UPDATABLE_FIELDS_BY_MODE: dict[str, tuple[str, ...]] = {
+    "ad": (*_SHOT_COMMON_UPDATABLE_FIELDS, "voiceover_text", "products_in_shot"),
+    # start_seconds 可改：镜头在歌曲时间轴上的入点是排片的核心编辑动作。
+    "mv": (*_SHOT_COMMON_UPDATABLE_FIELDS, "start_seconds", "lyrics_line", "is_performance"),
+}
+
+#: 走 shots 骨架的 content_mode。与 ``lib.script_skeleton.resolve_declared_kind`` 的
+#: ``("ad", "mv") → shots`` 同一事实——那边定形状，这边定「哪些模式的剧本可经本组端点改写」。
+_SHOTS_CONTENT_MODES = frozenset(_SHOT_UPDATABLE_FIELDS_BY_MODE)
 
 
-def _require_ad_script(script: dict, _t: Translator) -> list[dict]:
-    """断言剧本是 ad 形状（content_mode=ad 且含 shots 键），返回 shots 列表。
+def _require_shots_script(script: dict, _t: Translator, *, modes: frozenset[str] = _SHOTS_CONTENT_MODES) -> list[dict]:
+    """断言剧本走 shots 骨架（content_mode ∈ modes 且含 shots 键），返回 shots 列表。
 
     与 update_segment 的 narration 守卫同模式：其他模式的脚本即使残留 shots 键也拒绝，
-    避免被当 ad 改写。
+    避免被当 shots 剧本改写。``modes`` 收窄到单一模式供 reorder 这类只对特定模式成立的操作使用。
     """
-    if script.get("content_mode") != "ad" or "shots" not in script:
-        raise HTTPException(status_code=400, detail=_t("ad_mode_required"))
+    if script.get("content_mode") not in modes or "shots" not in script:
+        raise HTTPException(status_code=400, detail=_t("shots_mode_required"))
     shots = script.get("shots")
     # 非法形状 fail loud：静默降级为空列表会让 reorder 在客户端传空 shot_ids 时
     # 把损坏的 shots 覆盖成 []，直接丢数据。ValueError 由路由统一转 422。
     if not isinstance(shots, list):
-        raise ValueError("ad script field 'shots' must be a list")
+        raise ValueError("script field 'shots' must be a list")
     if not all(isinstance(s, dict) for s in shots):
-        raise ValueError("ad script field 'shots' contains non-object elements")
+        raise ValueError("script field 'shots' contains non-object elements")
     # shot_id 缺失/脏类型同样拦下：否则 PATCH 按 id 定位会误报 404，
     # reorder 的 s["shot_id"] 索引会 KeyError 变 500。
     if not all(isinstance(s.get("shot_id"), str) and s["shot_id"] for s in shots):
-        raise ValueError("ad script field 'shots' contains elements missing valid 'shot_id'")
+        raise ValueError("script field 'shots' contains elements missing valid 'shot_id'")
     # shot_id 是单镜头身份键：重复值会让 PATCH 静默更新首个命中项、reorder 失去 1:1 映射
     shot_ids = [s["shot_id"] for s in shots]
     if len(set(shot_ids)) != len(shot_ids):
-        raise ValueError("ad script field 'shots' contains duplicate 'shot_id' values")
+        raise ValueError("script field 'shots' contains duplicate 'shot_id' values")
     return shots
 
 
@@ -992,11 +1014,16 @@ async def update_shot(name: str, shot_id: str, req: UpdateShotRequest, _user: Cu
             matched_shot: dict[str, Any] | None = None
             with project_change_source("webui"):
                 with manager.locked_script(name, req.script_file) as script:
-                    for shot in _require_ad_script(script, _t):
+                    shots = _require_shots_script(script, _t)
+                    # 白名单按剧本自身声明的模式取（而非请求参数）：剧本是权威，请求侧无从、
+                    # 也不该指定「按哪个模式的字段集改写」。取值必在守卫放行后——守卫的模式集
+                    # 与本表同源，先取会让非 shots 剧本 KeyError 成 500 而不是 400。
+                    allowed = _SHOT_UPDATABLE_FIELDS_BY_MODE[script["content_mode"]]
+                    for shot in shots:
                         if shot.get("shot_id") == shot_id:
                             matched_shot = shot
                             for key, value in req.updates.items():
-                                if key in _SHOT_UPDATABLE_FIELDS:
+                                if key in allowed:
                                     # note 允许显式置 None（清空备注），其余字段 None 视为未提供
                                     if value is None and key != "note":
                                         continue
@@ -1039,7 +1066,9 @@ async def reorder_shots(name: str, req: ReorderShotsRequest, _user: CurrentUser,
 
             with project_change_source("webui"):
                 with manager.locked_script(name, req.script_file) as script:
-                    shots = _require_ad_script(script, _t)
+                    # 重排仅对 ad 成立：MV 的镜头顺序由 start_seconds 派生（镜头钉在歌曲
+                    # 绝对时间轴上），单改数组顺序会让展示顺序与时间轴对不上。
+                    shots = _require_shots_script(script, _t, modes=frozenset({"ad"}))
                     existing_ids = [s.get("shot_id") for s in shots]
 
                     # 校验失败 → 在锁内 raise 400，跳过写回

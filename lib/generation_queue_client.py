@@ -260,6 +260,11 @@ _IMAGE_STRUCTURED_TASK_TYPES = frozenset({"storyboard"})
 # 旁白合成任务：文本默认由执行层从剧本 novel_text 读取，prompt 允许缺省；
 # 显式传入时必须是非空字符串（作为待合成文本覆盖）。
 _TTS_TASK_TYPES = frozenset({"tts"})
+# 歌声合成（svs）：结构上**没有** prompt 这个概念——「唱什么旋律」由 target_song 决定、
+# 「用谁的嗓子」由 voice_reference 决定，二者都是 extra_payload 里的项目内路径。故要求
+# prompt 恒缺省：传了说明调用方把它当成了 t2m 一类的文生任务，喂进去的文字不会被引擎读取，
+# 却会让人以为控制得住产出。与 tts 的「可缺省」不同，这里是「不可存在」。
+_PROMPTLESS_TASK_TYPES = frozenset({"singing"})
 
 
 def _validate_prompt(task_type: str, prompt: str | dict[str, Any] | None) -> None:
@@ -285,6 +290,11 @@ def _validate_prompt(task_type: str, prompt: str | dict[str, Any] | None) -> Non
                 raise TaskSpecValidationError("prompt_text_empty")
         else:
             raise TaskSpecValidationError("prompt_must_be_string_or_object")
+        return
+
+    if task_type in _PROMPTLESS_TASK_TYPES:
+        if prompt is not None:
+            raise TaskSpecValidationError("prompt_not_accepted", task_type=task_type)
         return
 
     if task_type in _TTS_TASK_TYPES:

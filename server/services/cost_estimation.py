@@ -32,7 +32,11 @@ logger = logging.getLogger(__name__)
 CostBreakdown = dict[str, float]
 ActualBySegment = dict[str, dict[str, CostBreakdown]]
 # 费用页展示的记账类型；text 类调用不写 segment_id，只会落在项目级汇总里。
-ACTUAL_COST_TYPES = ("image", "video", "audio")
+# 实际费用按 call_type 分桶（仓储侧按 call_type 泛化聚合，枚举只在消费侧）。
+# 与 lib/providers.py::CallType 同源：新增记账通道要同步进来，否则那笔钱记进了 api_calls
+# 却不出现在费用页任何一栏——账上有、页面没有，是最难对账的一种缺口。text 不在此列：
+# 文本调用不挂 segment，走各自的会话用量视图。
+ACTUAL_COST_TYPES = ("image", "video", "audio", "music")
 
 
 def _add_cost(target: CostBreakdown, amount: float, currency: str) -> None:
@@ -484,10 +488,13 @@ class CostEstimationService:
         # 归类的图，以及 segment_id 列回填前的历史 video/audio 行。它们没有集归属线索，只并入
         # 项目级「未归属」。
         project_level_actual = actual_by_segment.get(PROJECT_LEVEL_SEGMENT_KEY, {})
+        # 音乐 / 歌声天然是项目级产物（一支片子一首曲，不挂分镜），恒走这条并入路径——
+        # 不在此列的话，MV 项目的作曲花费在费用页彻底不可见。
         for amounts in (
             project_image_by_type.get("other", {}),
             project_level_actual.get("video", {}),
             project_level_actual.get("audio", {}),
+            project_level_actual.get("music", {}),
         ):
             if amounts:
                 proj_act["unassigned"] = _merge_breakdowns(proj_act.get("unassigned", {}), amounts)

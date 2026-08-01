@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from lib.audio_backends.base import MusicBackend
 from lib.custom_provider.backends import (
     CustomAudioBackend,
     CustomImageBackend,
@@ -23,7 +24,7 @@ def create_custom_backend(
     model_id: str,
     endpoint: str,
     capability_overrides: object | None = None,
-) -> CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend:
+) -> CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend | MusicBackend:
     """按 endpoint 查 ENDPOINT_REGISTRY 并构造 Backend。
 
     视频后端额外注入生效能力（endpoint spec 系统判定 ⊕ 模型级用户覆盖），执行层据此门控，

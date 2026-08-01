@@ -687,9 +687,9 @@ class TestNewAPITaskEnvelope:
     """
 
     def test_normalize_flat_shape(self):
-        from lib.video_backends.newapi import _normalize_task_state
+        from lib.video_backends.newapi import normalize_newapi_task_state
 
-        state = _normalize_task_state(
+        state = normalize_newapi_task_state(
             {"task_id": "t", "status": "completed", "url": "https://cdn/a.mp4", "metadata": {"duration": 5}},
         )
         assert state["status"] == "completed"
@@ -697,9 +697,9 @@ class TestNewAPITaskEnvelope:
         assert state["metadata"] == {"duration": 5}
 
     def test_normalize_task_envelope(self):
-        from lib.video_backends.newapi import _normalize_task_state
+        from lib.video_backends.newapi import normalize_newapi_task_state
 
-        state = _normalize_task_state(
+        state = normalize_newapi_task_state(
             {
                 "code": "success",
                 "data": {"task_id": "t", "status": "SUCCESS", "result_url": "https://obs/a.mp4", "fail_reason": ""},
@@ -710,26 +710,28 @@ class TestNewAPITaskEnvelope:
         assert state["error"] is None
 
     def test_normalize_envelope_failure_reason(self):
-        from lib.video_backends.newapi import _normalize_task_state
+        from lib.video_backends.newapi import normalize_newapi_task_state
 
-        state = _normalize_task_state(
+        state = normalize_newapi_task_state(
             {"code": "success", "data": {"status": "FAILURE", "fail_reason": "上游拒绝"}},
         )
         assert state["status"] == "failed"
         assert state["error"] == {"message": "上游拒绝"}
 
     def test_normalize_openai_metadata_url(self):
-        from lib.video_backends.newapi import _normalize_task_state
+        from lib.video_backends.newapi import normalize_newapi_task_state
 
-        state = _normalize_task_state({"id": "t", "status": "completed", "metadata": {"url": "https://obs/b.mp4"}})
+        state = normalize_newapi_task_state(
+            {"id": "t", "status": "completed", "metadata": {"url": "https://obs/b.mp4"}}
+        )
         assert state["url"] == "https://obs/b.mp4"
 
     def test_unknown_status_is_not_terminal(self):
-        from lib.video_backends.newapi import _normalize_task_state
+        from lib.video_backends.newapi import normalize_newapi_task_state
 
         # IN_PROGRESS / QUEUED / 没见过的串都要继续轮询，不能当成终态。
         for raw in ("IN_PROGRESS", "QUEUED", "NOT_START", "weird"):
-            state = _normalize_task_state({"status": raw})
+            state = normalize_newapi_task_state({"status": raw})
             assert state["status"] not in ("completed", "failed", "expired")
 
     async def test_generate_completes_through_envelope(self, tmp_path: Path):
@@ -835,6 +837,89 @@ class TestNewAPIImageModes:
         assert len(images) == 2
         # 两张图不带 role 会被网关误判成首尾帧，必须显式钉住。
         assert role == "reference_image"
+
+    def test_gpustack_capabilities_expand_by_task_type(self):
+        """自建引擎的能力按门面 task_type 契约展开，而非一律保守判 0。"""
+        from lib.video_backends.newapi import NewAPIVideoBackend
+
+        # wan2.2-i2v 走 flf2v，支持尾帧；不支持纯参考图（r2v 是 bernini 的）
+        i2v = NewAPIVideoBackend.video_capabilities_for_model("wan2.2-i2v")
+        assert i2v.last_frame is True
+        assert i2v.max_reference_images == 0
+
+        # bernini 走 r2v，支持纯参考图；它没有首尾帧语义
+        bernini = NewAPIVideoBackend.video_capabilities_for_model("bernini")
+        assert bernini.max_reference_images > 0
+        assert bernini.last_frame is False
+
+        # 同名不同货的第三方模型不得被子串误伤（阿里云 wan2.2-i2v-plus 非自建）
+        third_party = NewAPIVideoBackend.video_capabilities_for_model("wan2.2-i2v-plus")
+        assert third_party.last_frame is False
+        assert third_party.max_reference_images == 0
+
+    def test_gpustack_flf2v_declares_task_type(self, tmp_path: Path):
+        """首尾帧必须显式声明 flf2v：模型名只推断得出 i2v，那条分支不读 images[1]。"""
+        backend = self._backend("wan2.2-i2v")
+        payload: dict = {}
+        metadata: dict = {}
+        backend._apply_gpustack_images(payload, metadata, ["a", "b"], None)
+
+        assert payload["images"] == ["a", "b"]
+        assert metadata["task_type"] == "flf2v"
+        # 裸键会被门面当作「原始输入」整单 400，一个都不能有
+        assert "image" not in payload
+        assert "last_frame" not in payload and "image_tail" not in metadata
+
+    def test_gpustack_single_frame_leaves_task_type_inferred(self, tmp_path: Path):
+        """单张首帧由模型名推断成 i2v，不必显式指定——少发一个键少一处出错面。"""
+        backend = self._backend("wan2.2-i2v")
+        payload: dict = {}
+        metadata: dict = {}
+        backend._apply_gpustack_images(payload, metadata, ["a"], None)
+
+        assert payload["images"] == ["a"]
+        assert "task_type" not in metadata
+
+    def test_gpustack_reference_images_use_r2v_keys(self, tmp_path: Path):
+        """参考直出走 r2v + src_ref_images；顶层 images 仍要留（门面据它判定有输入）。"""
+        backend = self._backend("bernini")
+        payload: dict = {}
+        metadata: dict = {}
+        backend._apply_gpustack_images(payload, metadata, ["r1", "r2"], "reference_image")
+
+        assert metadata["task_type"] == "r2v"
+        assert metadata["src_ref_images"] == ["r1", "r2"]
+        assert payload["images"] == ["r1", "r2"]
+        # 通用中转的写法不能混进来
+        assert "image_urls" not in metadata and "image_role" not in metadata
+
+    def test_gpustack_warns_when_tail_frame_would_be_dropped(self, tmp_path: Path, caplog):
+        """未登记 flf2v 的自建模型收到尾帧时告警——门面会静默丢弃，无声降级最难查。"""
+        backend = self._backend("wan2.2-t2v")
+        payload: dict = {}
+        metadata: dict = {}
+        with caplog.at_level("WARNING"):
+            backend._apply_gpustack_images(payload, metadata, ["a", "b"], None)
+
+        assert "task_type" not in metadata
+        assert "flf2v" in caplog.text
+
+    def test_third_party_relay_keeps_dual_write(self, tmp_path: Path):
+        """非自建模型保持「两套都发」——中转站事实标准那套不能丢。"""
+        backend = self._backend("doubao-seedance-2-0-260128")
+        request = VideoGenerationRequest(
+            prompt="p",
+            output_path=tmp_path / "o.mp4",
+            aspect_ratio="16:9",
+            duration_seconds=5,
+            reference_images=[self._png(tmp_path, "r1.png")],
+        )
+        images, role = backend._collect_images(request)
+        assert role == "reference_image"
+        # 自建方言不应作用于第三方模型
+        from lib.video_backends.newapi import is_gpustack_model
+
+        assert is_gpustack_model("doubao-seedance-2-0-260128") is False
 
     def test_backend_does_not_veto_capabilities(self, tmp_path: Path):
         """能力门控在上层（系统判定 ⊕ 用户覆盖），backend 不按模型名二次否决。

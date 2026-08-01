@@ -146,6 +146,22 @@ async def _get_or_create_audio_backend(
     return await _get_or_create_backend("audio", provider_name, provider_settings, resolver, default_audio_model)
 
 
+async def _get_or_create_music_backend(
+    provider_name: str,
+    resolver: ConfigResolver,
+    *,
+    default_music_model: str | None = None,
+):
+    """获取或创建 MusicBackend（带缓存）。
+
+    走与 audio 相同的 ``media_type="audio"`` 构造缝：音乐没有独立 media_type（复用同一条
+    并发通道），实际落到哪个 backend 由用户给该 model 选的 endpoint 决定——``newapi-music``
+    产出 MusicBackend，``openai-tts`` 产出 AudioBackend。选错 endpoint 的后果由执行器的
+    能力检查兜住（缺 generate_music 即 fail-loud），不在这里按模型名猜。
+    """
+    return await _get_or_create_backend("audio", provider_name, {}, resolver, default_music_model)
+
+
 @dataclass(frozen=True)
 class ImageLaneRequest:
     """声明本次任务需要 image lane。capability 决定 t2i / i2i 默认槽（``docs/adr/0001``）。"""
@@ -155,12 +171,34 @@ class ImageLaneRequest:
 
 @dataclass(frozen=True)
 class VideoLaneRequest:
-    """声明本次任务需要 video lane。"""
+    """声明本次任务需要 video lane。
+
+    ``lip_sync`` 为真时解析的是**口型驱动模型**（InfiniteTalk 一类的 s2v 模型）而非项目
+    配置的常规视频模型：普通图生视频模型没有 s2v 能力，拿它跑演唱镜头要么被门面拒，
+    要么更糟——照常出片但口型对不上，看成片才发现。仅 MV 的演唱镜头需要。
+    """
+
+    lip_sync: bool = False
 
 
 @dataclass(frozen=True)
 class AudioLaneRequest:
     """声明本次任务需要 audio lane（旁白 TTS）。"""
+
+
+@dataclass(frozen=True)
+class MusicLaneRequest:
+    """声明本次任务需要 music lane。
+
+    与 audio lane 分列：TTS 与作曲是不同模型、常在不同 provider，共用一条 lane 会让
+    「配了 TTS 就以为能作曲」。两者仍共用 worker 的 audio 并发通道（同一批 GPU）。
+
+    ``task_type`` 再分作曲（music）与歌声合成（singing）：ACE-Step 只会作曲、
+    SoulX-Singer 只会唱，共用一个模型配置会把请求发给不会那件事的模型——而调用侧
+    拦不住，同一个 backend 类承载两种能力，方法恒在，差异在模型上。
+    """
+
+    task_type: Literal["music", "singing"] = "music"
 
 
 @dataclass(frozen=True)
@@ -210,6 +248,21 @@ class AudioLaneResult:
     narration_speed: float | None
 
 
+@dataclass(frozen=True)
+class MusicLaneResult:
+    """music lane 解析产物。
+
+    只交付 backend 本身，不进 MediaGenerator：音乐是项目级单件产物（一支片子一首曲），
+    不像 audio 那样按分镜逐条产出，MediaGenerator 的版本管理与批量语义对它没有价值。
+    记账由执行器直接经 ledger 完成。
+    """
+
+    provider_model: ProviderModel
+    backend_name: str
+    backend_model: str
+    backend: object
+
+
 def _lane_not_declared(lane: str, request_hint: str) -> RuntimeError:
     return RuntimeError(
         f"{lane} lane 未声明：调用 resolve_generation_context 时传入 {request_hint} 才能访问该 lane 的解析产物"
@@ -228,6 +281,7 @@ class GenerationContext:
     image_lane: ImageLaneResult | None = None
     video_lane: VideoLaneResult | None = None
     audio_lane: AudioLaneResult | None = None
+    music_lane: MusicLaneResult | None = None
 
     @property
     def image(self) -> ImageLaneResult:
@@ -247,6 +301,12 @@ class GenerationContext:
             raise _lane_not_declared("audio", "audio=AudioLaneRequest()")
         return self.audio_lane
 
+    @property
+    def music(self) -> MusicLaneResult:
+        if self.music_lane is None:
+            raise _lane_not_declared("music", "music=MusicLaneRequest()")
+        return self.music_lane
+
 
 async def resolve_generation_context(
     project_name: str,
@@ -257,6 +317,7 @@ async def resolve_generation_context(
     image: ImageLaneRequest | None = None,
     video: VideoLaneRequest | None = None,
     audio: AudioLaneRequest | None = None,
+    music: MusicLaneRequest | None = None,
 ) -> GenerationContext:
     """在单个 ConfigResolver session 内解析全部声明 lane、构造 backend 并组装 MediaGenerator。
 
@@ -272,6 +333,7 @@ async def resolve_generation_context(
     image_result: ImageLaneResult | None = None
     video_result: VideoLaneResult | None = None
     audio_result: AudioLaneResult | None = None
+    music_result: MusicLaneResult | None = None
     image_backend: Any = None
     video_backend: Any = None
     audio_backend: Any = None
@@ -293,7 +355,15 @@ async def resolve_generation_context(
             )
 
         if video is not None:
-            resolved = await r.resolve_video_backend(project, payload)
+            if video.lip_sync:
+                resolved = await r.resolve_lip_sync_backend(project, payload)
+                if not resolved.provider_id or not resolved.model_id:
+                    raise RuntimeError(
+                        "尚未配置口型驱动模型：请到设置页「模型选择 → 口型驱动模型」选择一个"
+                        "支持数字人（s2v）的模型，如 infinitetalk-720p"
+                    )
+            else:
+                resolved = await r.resolve_video_backend(project, payload)
             video_backend = await _get_or_create_video_backend(
                 resolved.provider_id,
                 {},
@@ -344,6 +414,35 @@ async def resolve_generation_context(
                 narration_speed=await r.resolve_narration_speed(project),
             )
 
+        if music is not None:
+            resolved_music = await r.resolve_music_backend(project, payload, task_type=music.task_type)
+            if not resolved_music.provider_id or not resolved_music.model_id:
+                # 未配置：给出可操作的指引，而不是让 assemble_backend 抛
+                # 「no builtin ProviderSpec」——那句话对用户没有任何意义。
+                label = "音乐" if music.task_type == "music" else "歌声"
+                raise RuntimeError(
+                    f"尚未配置{label}模型：请到设置页「模型选择 → {label}模型」选择一个"
+                    f"自定义供应商下的模型（{label}模型需经自定义供应商接入）"
+                )
+            music_backend = await _get_or_create_music_backend(
+                resolved_music.provider_id,
+                r,
+                default_music_model=resolved_music.model_id or None,
+            )
+            if not hasattr(music_backend, "generate_music"):
+                # 选到了 TTS endpoint 而非 newapi-music：能力不符即刻失败，不让请求带着
+                # 一个不会作曲的 backend 走到执行层（那里只会抛 AttributeError，更难定位）。
+                raise RuntimeError(
+                    f"provider {resolved_music.provider_id} 的模型 {resolved_music.model_id} 不具备音乐生成能力："
+                    f"请在自定义供应商里把该模型的 endpoint 选为 newapi-music"
+                )
+            music_result = MusicLaneResult(
+                provider_model=resolved_music,
+                backend_name=music_backend.name,
+                backend_model=music_backend.model,
+                backend=music_backend,
+            )
+
     generator = MediaGenerator(
         project_path,
         rate_limiter=rate_limiter,
@@ -361,4 +460,5 @@ async def resolve_generation_context(
         image_lane=image_result,
         video_lane=video_result,
         audio_lane=audio_result,
+        music_lane=music_result,
     )

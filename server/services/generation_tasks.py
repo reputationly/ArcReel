@@ -6,15 +6,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from lib.asset_types import ASSET_SPECS
+from lib.audio_backends import MusicGenerationRequest, SingingSynthesisRequest
+from lib.audio_utils import slice_audio_window
 from lib.config.registry import PROVIDER_REGISTRY
 from lib.config.resolver import constrain_durations
 from lib.db.base import DEFAULT_USER_ID
-from lib.path_safety import safe_exists, safe_join, try_safe_join
+from lib.ledger import Ledger
+from lib.lip_sync import item_is_lip_sync
+from lib.path_safety import PathTraversalError, safe_exists, safe_join, try_safe_join
 from lib.project_change_hints import emit_project_change_batch, project_change_source
 from lib.project_manager import get_project_manager
 from lib.prompt_builders import (
@@ -31,6 +36,7 @@ from lib.prompt_utils import (
     utterances_to_dialogue,
     video_prompt_to_yaml,
 )
+from lib.providers import CALL_TYPE_MUSIC
 from lib.resource_paths import END_FRAME_RESOURCE_TYPE, resource_relative_path
 from lib.script_models import get_generated_assets, voiceover_text_field
 from lib.script_skeleton import SKELETON_ENTITY_TYPES, SKELETON_ITEM_NOUNS, resolve_script_kind
@@ -47,6 +53,7 @@ from lib.video_backends.base import VideoCapabilityError
 from server.services.generation_context import (
     AudioLaneRequest,
     ImageLaneRequest,
+    MusicLaneRequest,
     VideoLaneRequest,
     resolve_generation_context,
 )
@@ -493,6 +500,11 @@ def compute_affected_fingerprints(project_name: str, task_type: str, resource_id
     elif task_type == "tts":
         audio_rel = resource_relative_path("audio", resource_id)
         paths.append((audio_rel, project_path / audio_rel))
+    elif task_type in ("music", "singing"):
+        # 重复生成覆写同一路径（一支 MV 一首曲子 / 一条主唱轨）：不进指纹表的话，
+        # 前端播放器会一直放缓存里的旧音频，用户听不出「重生成到底有没有生效」。
+        media_rel = resource_relative_path(task_type, resource_id)
+        paths.append((media_rel, project_path / media_rel))
 
     result: dict[str, int] = {}
     for rel, abs_path in paths:
@@ -510,6 +522,9 @@ def compute_affected_fingerprints(project_name: str, task_type: str, resource_id
 _TASK_CHANGE_SPECS: dict[str, tuple] = {
     "tts": ("segment", "tts_ready", "旁白「{}」", True),
     "grid": ("grid", "grid_ready", "宫格「{}」", True),
+    # 音乐/歌声是项目级单件产物，不挂在某一集剧本上（include_script_episode=False）。
+    "music": ("music", "music_ready", "曲子「{}」", False),
+    "singing": ("singing", "singing_ready", "人声轨「{}」", False),
     **{atype: (atype, "updated", f"{spec.label_zh}「{{}}」设计图", False) for atype, spec in ASSET_SPECS.items()},
 }
 
@@ -717,6 +732,9 @@ async def execute_tts_task(
     字段名不写死在这里——字幕导出读的是同一份文案，两处各写一份会漂移成「字幕有词、
     配音没声」。文本为空 / segment 找不到 / 模式不支持整段朗读一律显式 raise，绝不把
     空串送给 backend 合成。
+
+    该表同时是 TTS 的**准入判定**：查不到字段名即拒绝。mv 有意不在表内——歌词要唱不要念，
+    人声走 ``generate_singing``；把它登记进来等于给 MV 开了配音的门，产物是被念出来的歌词。
     """
     script_file = payload.get("script_file")
 
@@ -786,6 +804,237 @@ async def execute_tts_task(
     }
 
 
+def _ledger() -> Ledger:
+    """音乐 / 歌声执行器共用的记账入口。
+
+    这两条路径不经 MediaGenerator（音乐是项目级单件产物，版本管理与批量语义对它没有价值，
+    见 MusicLaneResult），但记账不能因此缺席——生成路径少一条记账就是费用页少一块，且
+    「用量对不上」这种症状最难定位到具体是哪条路径漏的。
+    """
+    return Ledger()
+
+
+def _require_audio_capability(backend: object, method: str, model: str, *, task_label: str, hint: str) -> None:
+    """断言解析出的音频后端确实具备该任务需要的能力。
+
+    ``media_type="audio"`` 底下装着三种互不兼容的协议（TTS 只有 ``synthesize``、作曲只有
+    ``generate_music``、歌声只有 ``synthesize_singing``）。设置页的选项已按 endpoint 声明的能力
+    分列，但项目级覆盖、历史配置、直接改库都能绕过它——落到这里只剩一个没有目标方法的对象，
+    不拦就是 ``AttributeError``，错误信息里完全看不出「配错了模型」这回事。
+    """
+    if not hasattr(backend, method):
+        raise ValueError(f"模型 {model} 不具备{task_label}能力：{hint}")
+
+
+async def execute_music_task(
+    project_name: str,
+    resource_id: str,
+    payload: dict[str, Any],
+    *,
+    user_id: str = DEFAULT_USER_ID,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """生成一首曲子并落到项目的 ``music/`` 目录（同步等待，无续传）。
+
+    与 TTS 的两点不同：
+
+    - **产物是项目级单件**（一支片子一首曲），不挂在某个分镜下，故不写 scene asset、
+      也不走 VersionManager 的分镜版本链；写回由调用方（MV 剧本的 song 字段）负责。
+    - **文本是风格描述而非台词**：``payload.prompt`` 必填，空 prompt 会让引擎自由发挥，
+      产出与项目无关的曲子且照常计费，故显式拒绝。
+    """
+    prompt = payload.get("prompt") or payload.get("text")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("music task 需要 payload.prompt（曲风描述）")
+
+    project = await asyncio.to_thread(get_project_manager().load_project, project_name)
+    ctx = await resolve_generation_context(
+        project_name,
+        payload,
+        project=project,
+        user_id=user_id,
+        music=MusicLaneRequest(),
+    )
+
+    music_rel = resource_relative_path("music", resource_id)
+    project_path = await asyncio.to_thread(get_project_manager().get_project_path, project_name)
+    output_path = project_path / music_rel
+
+    duration = payload.get("duration_seconds")
+    lyrics = payload.get("lyrics")
+    bpm = payload.get("bpm")
+    language = payload.get("vocal_language")
+    request = MusicGenerationRequest(
+        prompt=prompt.strip(),
+        output_path=output_path,
+        duration_seconds=int(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
+        lyrics=lyrics if isinstance(lyrics, str) and lyrics.strip() else None,
+        bpm=int(bpm) if isinstance(bpm, (int, float)) and bpm > 0 else None,
+        vocal_language=language if isinstance(language, str) and language.strip() else None,
+    )
+
+    backend = ctx.music.backend
+    _require_audio_capability(
+        backend,
+        "generate_music",
+        ctx.music.backend_model,
+        task_label="作曲",
+        hint="请在设置页把作曲模型配成 ACE-Step 一类的 t2m 模型（旁白 TTS 模型不会作曲）",
+    )
+    # 记账括号：与图片 / 视频 / TTS 同一套（进入落 pending、成功递交 backend 结果对象、
+    # 异常自动翻 failed）。不经 MediaGenerator 但同样要记——漏了的表现是曲子生成成功、
+    # 费用页一行都没有，用量对不上却查不到是哪条路径漏的。
+    async with _ledger().record(
+        project_name=project_name,
+        call_type=CALL_TYPE_MUSIC,
+        model=ctx.music.backend_model,
+        prompt=request.prompt,
+        provider=ctx.music.provider_model.provider_id,
+        user_id=user_id,
+        output_path=str(output_path),
+    ) as call:
+        result = await backend.generate_music(request)  # type: ignore[attr-defined]
+        call.success(result)
+
+    return {
+        "file_path": music_rel,
+        "resource_type": "music",
+        "resource_id": resource_id,
+        "duration_seconds": result.duration_seconds,
+        "provider": result.provider,
+        "model": result.model,
+    }
+
+
+#: MV 主唱人声轨的 resource_id，与 sdk_tools/enqueue_singing.py 同源。
+_MV_MAIN_VOCAL_ID = "main"
+
+
+async def execute_singing_task(
+    project_name: str,
+    resource_id: str,
+    payload: dict[str, Any],
+    *,
+    user_id: str = DEFAULT_USER_ID,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """歌声合成：音色参考 + 目标曲 → 人声轨（同步等待，无续传）。
+
+    两个音频输入都是项目内相对路径，由调用方给出：
+    - ``voice_reference``：角色的 reference_audio（谁来唱）
+    - ``target_song``：作曲产物 music/main.wav（唱什么旋律）
+
+    缺任一方直接拒绝——引擎收到不全的输入会产出一段无关音频并照常计费。
+    """
+    voice_ref = payload.get("voice_reference")
+    target = payload.get("target_song")
+    if not isinstance(voice_ref, str) or not voice_ref.strip():
+        raise ValueError("singing task 需要 payload.voice_reference（音色参考音频的项目内相对路径）")
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("singing task 需要 payload.target_song（目标曲/伴奏的项目内相对路径）")
+
+    project = await asyncio.to_thread(get_project_manager().load_project, project_name)
+    project_path = await asyncio.to_thread(get_project_manager().get_project_path, project_name)
+
+    voice_abs = safe_join(project_path, voice_ref, require_file=True)
+    target_abs = safe_join(project_path, target, require_file=True)
+
+    ctx = await resolve_generation_context(
+        project_name,
+        payload,
+        project=project,
+        user_id=user_id,
+        # singing lane 解析的是歌声模型（default_singing_backend），不是作曲模型——
+        # 两者是不同模型，混用会把 svs 请求发给只会作曲的 ACE-Step。
+        music=MusicLaneRequest(task_type="singing"),
+    )
+    backend = ctx.music.backend
+    _require_audio_capability(
+        backend,
+        "synthesize_singing",
+        ctx.music.backend_model,
+        task_label="歌声合成",
+        hint="请在设置页把歌声模型配成 SoulX-Singer 一类的 svs 模型（作曲模型只会作曲、不会唱）",
+    )
+
+    singing_rel = resource_relative_path("singing", resource_id)
+    singing_path = project_path / singing_rel
+    # 与作曲同一记账通道：都按产出时长计价，只是 task_type 不同。
+    async with _ledger().record(
+        project_name=project_name,
+        call_type=CALL_TYPE_MUSIC,
+        model=ctx.music.backend_model,
+        # svs 没有文本 prompt（唱什么由目标曲决定），记账 prompt 落音色 + 目标曲的引用，
+        # 让费用页能看出这一次唱的是哪首。
+        prompt=f"svs voice={voice_ref} target={target}",
+        provider=ctx.music.provider_model.provider_id,
+        user_id=user_id,
+        output_path=str(singing_path),
+    ) as call:
+        result = await backend.synthesize_singing(  # type: ignore[attr-defined]
+            SingingSynthesisRequest(
+                voice_reference=voice_abs,
+                target_song=target_abs,
+                output_path=singing_path,
+            )
+        )
+        call.success(result)
+
+    return {
+        "file_path": singing_rel,
+        "resource_type": "singing",
+        "resource_id": resource_id,
+        "duration_seconds": result.duration_seconds,
+        "provider": result.provider,
+        "model": result.model,
+    }
+
+
+def _resolve_lip_sync_source(project: dict, project_path: Path, item: object) -> Path | None:
+    """MV 演唱镜头的整支歌声轨；其余情况返回 None（走常规图生视频）。
+
+    只有 ``content_mode=mv`` 且镜头 ``is_performance=true`` 才需要——歌声轨驱动人物口型。
+    非演唱镜头（氛围镜、空镜）传了驱动音频反而会让画面主体被强行对口型。
+
+    歌声轨缺失时**显式抛错而非静默降级**：降级的后果是演唱镜头照常出片、口型却对不上，
+    要到看成片才发现，且看不出原因。缺就报，让用户先跑 generate_singing。
+
+    返回的是整轨，尚不能直接送去驱动口型——按镜头时间窗切分见 ``_slice_lip_sync_window``。
+    """
+    if not item_is_lip_sync(project, item):
+        return None
+
+    vocal_rel = resource_relative_path("singing", _MV_MAIN_VOCAL_ID)
+    try:
+        return safe_join(project_path, vocal_rel, require_file=True)
+    except (PathTraversalError, FileNotFoundError) as exc:
+        raise ValueError(
+            f"演唱镜头需要歌声轨（{vocal_rel}）作口型驱动，但它不可用：请先用 generate_singing 合成歌声"
+        ) from exc
+
+
+async def _slice_lip_sync_window(source: Path, item: object, output: Path) -> Path:
+    """把整支歌声轨切到当前镜头对应的时间窗，作为该镜的驱动音频。
+
+    MV 镜头钉在歌曲的**绝对时间轴**上（``start_seconds``），而 s2v 是从音频第 0 秒开始驱动
+    口型的。整轨直接送进去，等于让第 40 秒那一镜的演员去对唱歌曲开头的词——除了 ``start_seconds``
+    恰为 0 的第一镜，其余演唱镜全部口型错位，且成片能听能看、只是对不上，最难排查。
+
+    时间窗读自剧本而非 payload：payload 的 ``duration_seconds`` 会被供应商档位收窄
+    （``assert_duration_supported`` 之前还可能回落到项目默认），而口型要对齐的是剧本排好的
+    那一段歌词。窗口比实际出片时长略长无害（多余部分不会被用到），错位才致命。
+    """
+    if not isinstance(item, dict):
+        raise ValueError("演唱镜头缺少剧本条目，无法确定驱动音频的时间窗")
+    start = item.get("start_seconds")
+    duration = item.get("duration_seconds")
+    if not isinstance(start, (int, float)) or isinstance(start, bool):
+        raise ValueError(f"演唱镜头的 start_seconds 无效: {start!r}；它是口型对齐的入点，必须是数字")
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration <= 0:
+        raise ValueError(f"演唱镜头的 duration_seconds 无效: {duration!r}；必须是正数")
+    return await slice_audio_window(source, output, start_seconds=float(start), duration_seconds=float(duration))
+
+
 async def execute_video_task(
     project_name: str,
     resource_id: str,
@@ -813,12 +1062,17 @@ async def execute_video_task(
         return _project, _project_path, _item
 
     project, project_path, item = await asyncio.to_thread(_load)
+    # MV 演唱镜头：以歌声轨作驱动音频走口型驱动（s2v）。非演唱镜头与其余内容模式不受影响。
+    # 这里只定位整轨（并对缺失 fail-loud），按镜头时间窗的切分推迟到真正要发请求时做。
+    lip_sync_source = _resolve_lip_sync_source(project, project_path, item)
     ctx = await resolve_generation_context(
         project_name,
         payload,
         project=project,
         user_id=user_id,
-        video=VideoLaneRequest(),
+        # 演唱镜头解析口型驱动模型，其余镜头走项目配置的常规视频模型——同一支 MV 里
+        # 两类镜头用不同模型，这是 MV 与其余内容模式的结构性差异。
+        video=VideoLaneRequest(lip_sync=lip_sync_source is not None),
     )
     generator = ctx.generator
 
@@ -917,19 +1171,28 @@ async def execute_video_task(
             raise ValueError(f"end frame snapshot not found: {end_frame_file.name}")
         end_image = end_frame_file
 
-    _, version, _, video_uri = await generator.generate_video_async(
-        prompt=prompt_text,
-        resource_type="videos",
-        resource_id=resource_id,
-        start_image=storyboard_file,
-        end_image=end_image,
-        aspect_ratio=aspect_ratio,
-        duration_seconds=duration_seconds,
-        resolution=resolution,
-        task_id=task_id,
-        seed=seed,
-        service_tier=service_tier,
-    )
+    # 切片是本次请求的一次性输入而非项目产物：落临时目录、随请求结束即弃。写进 music/ 会在
+    # 镜头改时长/改入点后留下一堆与剧本不再对应的残片，且被归档一并带走。
+    with tempfile.TemporaryDirectory(dir=tempfile.gettempdir(), prefix="arcreel-lipsync-") as tmpdir:
+        driving_audio = (
+            await _slice_lip_sync_window(lip_sync_source, item, Path(tmpdir) / f"driving_{resource_id}.wav")
+            if lip_sync_source is not None
+            else None
+        )
+        _, version, _, video_uri = await generator.generate_video_async(
+            prompt=prompt_text,
+            resource_type="videos",
+            resource_id=resource_id,
+            start_image=storyboard_file,
+            end_image=end_image,
+            driving_audio=driving_audio,
+            aspect_ratio=aspect_ratio,
+            duration_seconds=duration_seconds,
+            resolution=resolution,
+            task_id=task_id,
+            seed=seed,
+            service_tier=service_tier,
+        )
 
     return await _finalize_video_task(
         project_name=project_name,
@@ -1519,6 +1782,8 @@ _TASK_EXECUTORS = {
     "storyboard": execute_storyboard_task,
     "video": execute_video_task,
     "tts": execute_tts_task,
+    "music": execute_music_task,
+    "singing": execute_singing_task,
     "character": execute_character_task,
     "scene": execute_scene_task,
     "prop": execute_prop_task,

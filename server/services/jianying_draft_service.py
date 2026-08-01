@@ -37,22 +37,27 @@ _TRANSITION_MAP: dict[str, TransitionType] = {
 }
 
 # 字幕由有序 span 派生（而非单字段）的内容模式。drama 从 utterances 派生 subtitle_spans；
-# ad + reference_video 路径虽也产 span，但 content_mode 仍是 ad（已在 _SUBTITLE_TEXT_FIELDS），
+# ad + reference_video 路径虽也产 span，但 content_mode 仍是 ad（已在 SUBTITLE_TEXT_FIELDS），
 # 故此处只列 drama。未注册且不在此集合的模式（未知脏值）不挂字幕轨。
 _SPAN_SUBTITLE_MODES: frozenset[str] = frozenset({"drama"})
 
 from lib.path_safety import PathTraversalError, safe_join, safe_resolve
 from lib.project_manager import ProjectManager, effective_mode
 from lib.reference_video.ad_units import ad_shots_by_id
-from lib.script_models import VOICEOVER_TEXT_FIELDS, ad_shot_duration_seconds, get_generated_assets
+from lib.resource_paths import resource_relative_path
+from lib.script_models import SUBTITLE_TEXT_FIELDS, ad_shot_duration_seconds, get_generated_assets
 from lib.script_skeleton import SKELETONS, resolve_declared_kind
 from lib.speech_rate import estimate_spoken_seconds
 
-# content_mode → 整段单字幕文案源字段。字幕与 TTS 读的是同一份口播文案，字段名因此
-# 收敛到 lib.script_models 单点声明（两处各写一份会漂移成「字幕有词、配音没声」）。
+# content_mode → 整段单字幕文案源字段，收敛到 lib.script_models 单点声明。
+# 该表是 TTS 口播表的超集：narration / ad 两条链读同一份文案（各写一份会漂移成
+# 「字幕有词、配音没声」），mv 只在字幕侧登记——歌词是字幕但不能拿去念。
 # drama 不在表内：口播是场景级有序 utterances，按 span 逐条派生
 # （见 _SPAN_SUBTITLE_MODES / _utterance_subtitle_spans）。
-_SUBTITLE_TEXT_FIELDS = VOICEOVER_TEXT_FIELDS
+_SUBTITLE_TEXT_FIELDS = SUBTITLE_TEXT_FIELDS
+
+#: 项目级单曲的固定 resource_id，与 sdk_tools/enqueue_music.py 同源。
+_MAIN_MUSIC_TRACK_ID = "main"
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +289,7 @@ class JianyingDraftService:
         width: int,
         height: int,
         content_mode: str,
+        music_path: str | None = None,
     ) -> None:
         """使用 pyJianYingDraft 在 draft_dir 中生成草稿文件"""
         draft_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -418,7 +424,35 @@ class JianyingDraftService:
             audio_seg = AudioSegment(audio_material, trange(start_us, duration_us))
             script_file.add_segment(audio_seg, "旁白")
 
+        self._add_music_track(script_file, music_path)
+
         script_file.save()
+
+    def _add_music_track(self, script_file: Any, music_path: str | None) -> None:
+        """项目有配乐时挂一条独立音乐轨，从 0 起铺满自身时长。
+
+        与旁白轨分开而非混在一条：剪映里两者要分别调音量（配乐通常压到 -20dB 给人声让位），
+        同轨无法单独调整。不按视频总长裁剪——曲子长过片子时由用户在剪映裁，短过片子时留白，
+        这里不替用户决定循环还是留白。
+
+        ``music_path`` 为 None 即项目没有配乐，静默跳过：绝大多数项目（narration /
+        drama / ad）本就没有，缺文件是常态而非异常。
+        """
+        if music_path is None:
+            return
+
+        try:
+            material = AudioMaterial(music_path)
+        except Exception as exc:
+            logger.warning("配乐无法解析，已跳过: %s (%s)", music_path, exc)
+            return
+
+        if material.duration <= 0:
+            logger.warning("配乐有效时长不足，已跳过: %s", music_path)
+            return
+
+        script_file.add_track(TrackType.audio, "配乐")
+        script_file.add_segment(AudioSegment(material, trange(0, material.duration)), "配乐")
 
     def _replace_paths_in_draft(self, *, json_path: Path, tmp_prefix: str, target_prefix: str) -> None:
         """JSON 安全地替换 draft_content.json 中的临时路径"""
@@ -494,8 +528,11 @@ class JianyingDraftService:
         if not isinstance(raw_title, str) or not raw_title.strip():
             raw_title = project_name
         safe_title = raw_title.replace("/", "_").replace("\\", "_").replace("..", "_")
-        # ad 恒单集且界面不暴露「集」概念，草稿名直接用项目标题
-        draft_name = safe_title if content_mode == "ad" else f"{safe_title}_第{episode}集"
+        # 恒单集的模式（ad / mv）界面不暴露「集」概念，草稿名直接用项目标题——
+        # 名单取自 ProjectManager，不在此另列，否则新增单件成品模式会导出成「标题_第1集」
+        draft_name = (
+            safe_title if content_mode in ProjectManager.SINGLE_EPISODE_MODES else f"{safe_title}_第{episode}集"
+        )
         # 消毒后可能只剩 pathlib 会丢弃的空段（如标题为 "."）：塌缩的草稿目录会让
         # create_draft(allow_replace=True) 把 rmtree 落到上层临时目录，这里回退项目名兜底
         if not draft_name.replace(".", "").strip():
@@ -527,6 +564,13 @@ class JianyingDraftService:
                     local_clip["narration_audio_local"] = stage_once(audio_src)
                 local_clips.append(local_clip)
 
+            # 配乐与视频素材同样要暂存：草稿里的路径会被整体替换成用户本地剪映目录，
+            # 直接引用项目内原路径会让草稿在对方机器上找不到文件。
+            music_local: str | None = None
+            music_src = safe_resolve(project_dir, resource_relative_path("music", _MAIN_MUSIC_TRACK_ID))
+            if music_src is not None:
+                music_local = stage_once(music_src)
+
             # 5. 生成草稿（create_draft 会重建 draft_dir；草稿放独立父目录下，
             # 避免草稿名与暂存区等临时目录同级重名时被 allow_replace 误删）
             draft_dir = tmp_dir / "draft" / draft_name
@@ -537,6 +581,7 @@ class JianyingDraftService:
                 width=width,
                 height=height,
                 content_mode=content_mode,
+                music_path=music_local,
             )
 
             # 6. 将素材移入草稿目录（暂存区内容即全部已暂存素材）

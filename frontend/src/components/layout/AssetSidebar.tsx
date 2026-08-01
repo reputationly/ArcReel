@@ -21,6 +21,7 @@ import { API } from "@/api";
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { isDemoProject } from "@/onboarding/demo-project";
 import { EpisodeCard } from "./EpisodeCard";
+import { isSingleEpisodeMode } from "@/utils/content-mode";
 
 interface AssetSidebarProps {
   className?: string;
@@ -53,7 +54,9 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
   const propCount = Object.keys(currentProjectData?.props ?? {}).length;
   const productCount = Object.keys(currentProjectData?.products ?? {}).length;
   const episodes = currentProjectData?.episodes ?? [];
-  // 广告/短片项目恒单集：隐藏「集」语义（标题/计数/搜索/添加），直达唯一视频
+  // 两个概念刻意分开命名：恒单集（ad / mv）决定是否隐藏「集」语义，是否广告片决定
+  // 产品资产入口。合成一个 isAd 会让「给 mv 补单集语义」顺手把广告专属入口也开给 mv。
+  const isSingleEpisode = isSingleEpisodeMode(currentProjectData?.content_mode);
   const isAd = currentProjectData?.content_mode === "ad";
 
   const sourceFilesVersion = useAppStore((s) => s.sourceFilesVersion);
@@ -144,7 +147,7 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
   };
 
   // ad 隐藏搜索框，残留的 search state 不参与过滤，避免唯一视频入口被吞
-  const filteredEps = isAd
+  const filteredEps = isSingleEpisode
     ? episodes
     : episodes.filter(
         (ep) => !search || ep.title.includes(search) || String(ep.episode).includes(search),
@@ -239,11 +242,11 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
               className="text-[10.5px] font-bold uppercase"
               style={{ color: "var(--color-text-4)", letterSpacing: "0.8px" }}
             >
-              {isAd
+              {isSingleEpisode
                 ? t("dashboard:ad_video_section_title")
                 : t("dashboard:episodes_section_title")}
             </span>
-            {!isAd && (
+            {!isSingleEpisode && (
               <>
                 <span className="num text-[10px]" style={{ color: "var(--color-text-4)" }}>
                   {episodes.length}
@@ -267,7 +270,7 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
             )}
           </div>
 
-          {!isAd && (
+          {!isSingleEpisode && (
             <div className="px-2.5 pb-2">
               <div
                 className="flex items-center gap-1.5 rounded-md px-2 py-1.5"
@@ -310,8 +313,8 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
                   ep={ep}
                   active={ep.episode === activeEp}
                   onClick={() => setLocation(`/episodes/${ep.episode}`)}
-                  showEpisodeBadge={!isAd}
-                  fallbackTitle={isAd ? currentProjectData?.title : undefined}
+                  showEpisodeBadge={!isSingleEpisode}
+                  fallbackTitle={isSingleEpisode ? currentProjectData?.title : undefined}
                 />
               ))
             )}
@@ -320,7 +323,7 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
       ) : (
         <div className="flex-1 overflow-y-auto px-2.5 py-1.5">
           {filteredEps.map((ep) => {
-            const epLabel = isAd
+            const epLabel = isSingleEpisode
               ? t("dashboard:ad_video_section_title")
               : t("dashboard:episode_collapsed_button_label", {
                   episode: ep.episode,
@@ -342,7 +345,7 @@ export function AssetSidebar({ className }: AssetSidebarProps) {
                     : "var(--color-text-3)",
               }}
             >
-              {isAd ? <Clapperboard className="h-4 w-4" aria-hidden /> : `E${ep.episode}`}
+              {isSingleEpisode ? <Clapperboard className="h-4 w-4" aria-hidden /> : `E${ep.episode}`}
             </button>
             );
           })}

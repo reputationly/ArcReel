@@ -30,8 +30,11 @@ from lib.config.registry import (
 from lib.config.service import (
     _DEFAULT_AUDIO_BACKEND,
     _DEFAULT_IMAGE_BACKEND,
+    _DEFAULT_LIP_SYNC_BACKEND,
+    _DEFAULT_MUSIC_BACKEND,
     _DEFAULT_REFERENCE_SINGLE_MAX_BYTES,
     _DEFAULT_REFERENCE_TOTAL_MAX_BYTES,
+    _DEFAULT_SINGING_BACKEND,
     _DEFAULT_TEXT_BACKEND,
     _DEFAULT_VIDEO_BACKEND,
     ConfigService,
@@ -147,6 +150,36 @@ def _payload_model_or_default(raw_model: object, provider_id: str, media_type: s
     if isinstance(raw_model, str) and raw_model.strip():
         return raw_model.strip()
     return default_model_for_provider(provider_id, media_type)
+
+
+@dataclass(frozen=True)
+class _MusicTaskKeys:
+    """音乐类任务的一组配置键。作曲与歌声合成各占一组，避免两种能力共用一个模型配置。"""
+
+    setting_key: str
+    project_field: str
+    payload_provider: str
+    payload_model: str
+    default_value: str
+
+
+#: task_type → 配置键组。未登记的 task_type 回落到作曲那组（调用方只会传这两个之一）。
+_MUSIC_TASK_SETTING_KEYS: dict[str, _MusicTaskKeys] = {
+    "music": _MusicTaskKeys(
+        setting_key="default_music_backend",
+        project_field="music_backend",
+        payload_provider="music_provider",
+        payload_model="music_model",
+        default_value=_DEFAULT_MUSIC_BACKEND,
+    ),
+    "singing": _MusicTaskKeys(
+        setting_key="default_singing_backend",
+        project_field="singing_backend",
+        payload_provider="singing_provider",
+        payload_model="singing_model",
+        default_value=_DEFAULT_SINGING_BACKEND,
+    ),
+}
 
 
 # 档位 → 设置键。全局（system_settings）与项目级（project.json）同名同构。
@@ -515,6 +548,35 @@ class ConfigResolver:
         async with self._open_session() as (session, svc):
             return await self._resolve_video_provider_model(svc, session, project, payload)
 
+    async def resolve_lip_sync_backend(
+        self,
+        project: dict | None,
+        payload: dict | None,
+    ) -> ProviderModel:
+        """解析口型驱动（数字人 s2v）任务应使用的 ProviderModel。
+
+        与常规视频模型分列：普通图生视频模型（wan2.2-i2v 等）没有 s2v 能力，用它跑演唱镜头
+        会被门面拒，或更糟——照常出片但口型对不上，看成片才发现。故 MV 的演唱镜头单独选模型，
+        其余镜头仍走项目配置的视频模型。
+
+        优先级同其余解析：payload > project（``lip_sync_backend``）> 全局默认（可为空 = 未配置）。
+        """
+        async with self._open_session() as (_session, svc):
+            if payload:
+                provider_id = _trusted_payload_provider(payload.get("lip_sync_provider"))
+                if provider_id is not None:
+                    model = payload.get("lip_sync_model")
+                    if isinstance(model, str) and model.strip():
+                        return ProviderModel(provider_id, model.strip())
+            if project is not None:
+                parsed = _parse_project_provider(project.get("lip_sync_backend"), "video")
+                if parsed is not None:
+                    return ProviderModel(*parsed)
+            raw = await svc.get_setting("default_lip_sync_backend", "")
+            if raw and "/" in raw:
+                return ProviderModel(*ConfigService._parse_backend(raw, _DEFAULT_LIP_SYNC_BACKEND))
+            return ProviderModel("", "")
+
     async def resolve_resolution(self, project: dict, provider_id: str, model_id: str) -> str | None:
         """按 project.model_settings → legacy video_model_settings → 自定义供应商默认 → None。
 
@@ -566,6 +628,57 @@ class ConfigResolver:
         """
         async with self._open_session() as (session, svc):
             return await self._resolve_audio_provider_model(svc, session, project, payload)
+
+    async def default_music_backend(self, task_type: str = "music") -> tuple[str, str]:
+        """返回系统级默认音乐类 (provider_id, model_id)（不含项目级覆盖）。"""
+        keys = _MUSIC_TASK_SETTING_KEYS.get(task_type, _MUSIC_TASK_SETTING_KEYS["music"])
+        async with self._open_session() as (_session, svc):
+            return await self._resolve_default_music_backend(svc, keys)
+
+    async def resolve_music_backend(
+        self,
+        project: dict | None,
+        payload: dict | None,
+        *,
+        task_type: str = "music",
+    ) -> ProviderModel:
+        """解析音乐类任务应使用的 ProviderModel。
+
+        **按 task_type 分流**：作曲（music）与歌声合成（singing）是两个不同的模型
+        ——ACE-Step 只会作曲、SoulX-Singer 只会唱。共用一个配置会让「配了作曲模型」
+        被当成「能唱歌」，请求发到引擎才被拒，而调用侧的 hasattr 检查拦不住
+        （同一个 backend 类承载两种能力，方法恒在，差异在模型上）。
+
+        优先级与 audio 同构：payload > project > 全局默认，三层的键名都按 task_type 取。
+        """
+        keys = _MUSIC_TASK_SETTING_KEYS.get(task_type, _MUSIC_TASK_SETTING_KEYS["music"])
+        async with self._open_session() as (session, svc):
+            if payload:
+                provider_id = _trusted_payload_provider(payload.get(keys.payload_provider))
+                if provider_id is not None:
+                    model = payload.get(keys.payload_model)
+                    if isinstance(model, str) and model.strip():
+                        return ProviderModel(provider_id, model.strip())
+            if project is not None:
+                parsed = _parse_project_provider(project.get(keys.project_field), "music")
+                if parsed is not None:
+                    return ProviderModel(*parsed)
+            return ProviderModel(*await self._resolve_default_music_backend(svc, keys))
+
+    async def _resolve_default_music_backend(self, svc: ConfigService, keys: _MusicTaskKeys) -> tuple[str, str]:
+        """全局默认音乐类后端（按 task_type 取对应设置键）。
+
+        与 audio 的区别：**不做 ``_auto_resolve_backend`` 自动推断**。自动推断按「哪个
+        provider 配了 key」选，而配了 key 不代表部署了 ACE-Step / SoulX-Singer——这类模型
+        是自建特有的，推断出来的 provider 多半根本没有作曲或歌声能力，请求发出去才失败。
+        缺配置时直接落到显式默认值，用户在设置页改一次即可。
+        """
+        raw = await svc.get_setting(keys.setting_key, "")
+        if raw and "/" in raw:
+            return ConfigService._parse_backend(raw, keys.default_value)
+        # 未配置：返回空对，由执行器给出「请先配置」的明确指引。不落任何内置默认——
+        # 这两类模型都经自定义供应商接入，任何裸 provider id 都构造不出 backend。
+        return "", ""
 
     async def resolve_narration_voice(self, project: dict | None) -> str:
         """解析旁白音色：project.json 顶层 ``narration_voice`` > 全局 setting > 服务默认。"""

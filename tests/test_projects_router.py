@@ -141,7 +141,7 @@ class _FakePM:
                 target_duration if target_duration is not None else ProjectManager.AD_DEFAULT_TARGET_DURATION
             )
             payload["brief"] = brief if brief is not None else ""
-            payload["episodes"] = [dict(ProjectManager.AD_SINGLE_EPISODE)]
+            payload["episodes"] = [dict(ProjectManager.SINGLE_EPISODE)]
         if default_duration is not None:
             payload["default_duration"] = default_duration
         if style_template_id is not None:

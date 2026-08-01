@@ -56,6 +56,7 @@ import {
   useModelCapabilities,
 } from "@/hooks/useModelCapabilities";
 import { effectiveMode } from "@/utils/generation-mode";
+import { hasSourceReview } from "@/utils/content-mode";
 import type { Scene, Prop, Product, CustomProviderInfo, ProviderInfo } from "@/types";
 import type { EpisodeScript } from "@/types/script";
 
@@ -78,7 +79,7 @@ function resolveSegmentPrompt(
   const seg =
     script.content_mode === "narration"
       ? script.segments.find((s) => s.segment_id === segmentId)
-      : script.content_mode === "ad"
+      : script.content_mode === "ad" || script.content_mode === "mv"
         ? script.shots.find((s) => s.shot_id === segmentId)
         : script.scenes.find((s) => s.scene_id === segmentId);
   return {
@@ -197,7 +198,10 @@ export function StudioCanvasRouter() {
         ? { [fieldOrPatch]: value }
         : fieldOrPatch;
     try {
-      if (mode === "ad") {
+      // ad / mv 同为 shots 骨架、走同一组 script-shots 端点（字段白名单由后端按剧本
+      // 自身的 content_mode 取）。漏掉 mv 会让 MV 镜头的保存打到 narration 的
+      // segments 端点上、带着 shot_id 报 404。
+      if (mode === "ad" || mode === "mv") {
         await API.updateShot(currentProjectName, segmentId, scriptFile ?? "", patch);
       } else if (mode === "drama") {
         await API.updateScene(currentProjectName, segmentId, scriptFile ?? "", patch);
@@ -689,11 +693,16 @@ export function StudioCanvasRouter() {
           const adReference = isAd && mode === "reference_video";
 
           // 已选集但剧本未生成：进入切片审阅视图（narration/drama 全部生成路径——
-          // reference_video 此时 units 为空，同样没有可展示内容）；ad 恒单集无源文
-          // 切片，走各自画布。
+          // reference_video 此时 units 为空，同样没有可展示内容）。
+          // ad / mv 不导入源文、没有切片可审：判据取 hasSourceReview（与后端 has_step1 同表），
+          // 用 isAd 会让新建的 MV 项目在 patch_song 落剧本之前停在一张永远空的源文审阅页上。
           // 演示项目没有源文可切片，缺剧本的分集直接说明「演示只做到第 1 集」
           const showSourceReview =
-            Boolean(episode) && !script && !hasDraft && !isAd && !demoMode;
+            Boolean(episode) &&
+            !script &&
+            !hasDraft &&
+            hasSourceReview(currentProjectData?.content_mode) &&
+            !demoMode;
 
           return (
             <div className="flex h-full flex-col">

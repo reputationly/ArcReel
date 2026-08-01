@@ -15,6 +15,7 @@ import { AdInitCanvas } from "./AdInitCanvas";
 import { ConflictModal, type ConflictResolution } from "./ConflictModal";
 import { AgentHandoffHint } from "@/components/copilot/AgentHandoffHint";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
+import { contentModeLabelKey, isSingleEpisodeMode } from "@/utils/content-mode";
 
 interface OverviewCanvasProps {
   projectName: string;
@@ -50,7 +51,10 @@ export function OverviewCanvas({
   const { t } = useTranslation(["dashboard", "common"]);
   const tRef = useRef(t);
   tRef.current = t;
-  // 广告/短片项目恒单集：界面隐藏「集」语义，区块按单视频呈现
+  // 两个概念刻意分开命名：恒单集（ad / mv）决定是否隐藏「集」语义，是否广告片决定是否
+  // 进产品/brief 初始化页。合成一个 isAd 会把刚建的 MV 项目送进广告片的产品填写流程，
+  // 而 MV 的第一步是写歌。
+  const isSingleEpisode = isSingleEpisodeMode(projectData?.content_mode);
   const isAd = projectData?.content_mode === "ad";
   const projectTotals = useCostStore((s) => s.costData?.project_totals);
   const getEpisodeCost = useCostStore((s) => s.getEpisodeCost);
@@ -313,11 +317,7 @@ export function OverviewCanvas({
                 letterSpacing: "1.4px",
               }}
             >
-              {projectData.content_mode === "narration"
-                ? t("narration_visuals_mode")
-                : projectData.content_mode === "ad"
-                  ? t("ad_short_video_mode")
-                  : t("drama_animation_mode")}
+              {t(contentModeLabelKey(projectData.content_mode))}
             </p>
           </div>
         </header>
@@ -737,9 +737,9 @@ export function OverviewCanvas({
                   className="display-serif text-[15px] font-semibold tracking-tight"
                   style={{ color: "var(--color-text)" }}
                 >
-                  {isAd ? t("ad_video_section_title") : t("episodes_title")}
+                  {isSingleEpisode ? t("ad_video_section_title") : t("episodes_title")}
                 </h3>
-                {!isAd && (projectData.episodes?.length ?? 0) > 0 && (
+                {!isSingleEpisode && (projectData.episodes?.length ?? 0) > 0 && (
                   <span
                     className="num text-[10.5px]"
                     style={{ color: "var(--color-text-4)" }}
@@ -769,7 +769,7 @@ export function OverviewCanvas({
                           boxShadow: "inset 0 1px 0 oklch(1 0 0 / 0.03)",
                         }}
                       >
-                        {!isAd && (
+                        {!isSingleEpisode && (
                           <span
                             className="rounded px-1.5 py-0.5 text-[10.5px] font-bold"
                             style={{
@@ -782,10 +782,10 @@ export function OverviewCanvas({
                           </span>
                         )}
                         <span style={{ color: "var(--color-text)", fontFamily: "var(--font-sans)" }}>
-                          {ep.title || (isAd ? projectData.title : "")}
+                          {ep.title || (isSingleEpisode ? projectData.title : "")}
                         </span>
                         <span style={{ color: "var(--color-text-4)" }}>
-                          {t(isAd ? "shots_and_status" : "segments_and_status", {
+                          {t(isSingleEpisode ? "shots_and_status" : "segments_and_status", {
                             count: ep.scenes_count ?? "?",
                             status: t(`episode_status_label_${ep.status ?? "draft"}`),
                           })}

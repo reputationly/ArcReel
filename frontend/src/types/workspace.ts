@@ -26,6 +26,9 @@ export interface ProjectChange {
     | "overview"
     | "draft"
     | "grid"
+    // MV 的项目级音频产物：music 是曲子、singing 是人声轨，各自单件、不挂在某一集上。
+    | "music"
+    | "singing"
     // task 不是项目实体，而是任务终态的刷新信号（important=false / focus=null）：
     // 只用来重拉任务列表与受影响画布，不进通知与聚焦跳转。
     | "task";
@@ -38,6 +41,8 @@ export interface ProjectChange {
     | "grid_ready"
     | "reference_video_ready"
     | "tts_ready"
+    | "music_ready"
+    | "singing_ready"
     | "task_succeeded"
     | "task_failed"
     | "task_cancelled";

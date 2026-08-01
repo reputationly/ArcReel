@@ -21,6 +21,13 @@ _FIELD_MEDIA_TYPES: dict[str, str] = {
     "default_image_backend_i2i": "image",
     "audio_backend": "audio",
     "default_audio_backend": "audio",
+    # 音乐与歌声模型共用 audio 媒体类型（endpoint newapi-music 的 media_type 即 audio）。
+    # 实际部署里它们必然走自定义供应商（registry 外，逐模型能力无从判定、放行），
+    # 登记在此是为了拦住把内置 video/text 模型误配成音乐模型这类明显错配。
+    "default_music_backend": "audio",
+    "default_singing_backend": "audio",
+    # 口型驱动产出的是视频，媒体类型归 video（与常规视频模型同类，只是能力维度不同）。
+    "default_lip_sync_backend": "video",
     "text_backend_simple": "text",
     "text_backend_complex": "text",
     "default_text_backend": "text",

@@ -369,7 +369,12 @@ async def _extract_provider(task: dict[str, Any]) -> str:
     payload = task.get("payload") or {}
     # 以 media lane 区分 video / audio / image：reference_video 等 task_type 同属 video lane。
     is_video = task.get("media_type") == "video" or task.get("task_type") in ("video", "reference_video")
-    is_audio = task.get("media_type") == "audio" or task.get("task_type") == "tts"
+    # music / singing 必须在 audio 之前判定：它们的 media_type 就是 audio（共用同一条
+    # worker 并发通道），放在 is_audio 之后永远命中不到，会用 TTS 的 provider 去认领与限流
+    # ——TTS 在厂商托管、音乐在自建网关时，音乐任务会去占 TTS 供应商的并发额度。
+    task_type = task.get("task_type")
+    is_music = task_type in ("music", "singing")
+    is_audio = task.get("media_type") == "audio" or task_type == "tts"
 
     # 整体兜底：含项目加载（队列里可能有指向已删除/不可读项目的历史任务，load_project 会抛
     # FileNotFoundError）在内的任何失败都回退 DEFAULT_PROVIDER，绝不冒泡阻断认领循环（见 docstring）。
@@ -385,7 +390,16 @@ async def _extract_provider(task: dict[str, Any]) -> str:
 
         resolver = ConfigResolver(async_session_factory)
         if is_video:
-            resolved = await resolver.resolve_video_backend(project, payload)
+            # 与入队派生同源（见 lib/lip_sync.py）：MV 演唱镜同为 task_type="video" 却走
+            # 口型驱动模型，限流槽要跟着分流，否则会去占常规视频供应商的并发额度。
+            from lib.lip_sync import task_is_lip_sync
+
+            if await asyncio.to_thread(task_is_lip_sync, project_name, project, payload, task.get("resource_id")):
+                resolved = await resolver.resolve_lip_sync_backend(project, payload)
+            else:
+                resolved = await resolver.resolve_video_backend(project, payload)
+        elif is_music:
+            resolved = await resolver.resolve_music_backend(project, payload, task_type=str(task_type))
         elif is_audio:
             resolved = await resolver.resolve_audio_backend(project, payload)
         else:

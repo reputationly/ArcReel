@@ -403,6 +403,7 @@ describe("stores", () => {
       video_count: 2,
       text_count: 0,
       audio_count: 0,
+      music_count: 0,
       failed_count: 1,
       total_count: 8,
     });

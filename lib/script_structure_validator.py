@@ -21,6 +21,7 @@ from lib.data_validator import ValidationResult
 from lib.script_models import (
     AdEpisodeScript,
     DramaEpisodeScript,
+    MVEpisodeScript,
     NarrationEpisodeScript,
     ReferenceVideoScript,
 )
@@ -42,18 +43,39 @@ _KIND_MODEL: dict[str, type[BaseModel]] = {
     "shots": AdEpisodeScript,
 }
 
+#: ``shots`` 骨架下按 content_mode 再分的模型。ad 与 mv 的镜头数据形状相同（平铺数组 +
+#: shot_id），字段不同（mv 有 start_seconds / section / lyrics_line / is_performance），
+#: 故骨架同、模型异。骨架表只描述形状，这一层分派留在校验本地。
+_SHOTS_MODEL_BY_CONTENT_MODE: dict[str, type[BaseModel]] = {
+    "mv": MVEpisodeScript,
+}
+
+
+def model_for_kind(kind: str, content_mode: str | None) -> type[BaseModel]:
+    """``(骨架种类, content_mode)`` → 剧本 Pydantic 模型。
+
+    两个消费方共用这一张表，各自按合法途径拿 ``kind``：结构校验走取证解析
+    （``resolve_script_kind``，数据形状优先），剧本生成走规范解析
+    （``resolve_declared_kind``，它本就持有项目声明）。
+
+    ``content_mode`` 必须参与：``ad`` 与 ``mv`` 同为 ``shots`` 骨架但字段不同，只按 kind 取模型
+    会让 MV 的响应被拿去校验 ``AdEpisodeScript``——7 条字段错误、静默回落原始数据，于是校验对
+    MV 恒为空转，还每次刷一条指不到真因的 warning。
+    """
+    if kind == "shots" and isinstance(content_mode, str):
+        override = _SHOTS_MODEL_BY_CONTENT_MODE.get(content_mode)
+        if override is not None:
+            return override
+    return _KIND_MODEL[kind]
+
 
 def _select_model(script: dict[str, Any]) -> type[BaseModel]:
-    """按模式判别该用哪个剧本模型，判别逻辑收归 `script_skeleton.resolve_script_kind`（取证解析，
-    单一真相源，与编辑核心、写盘统一入口的 metadata 重算共用，不漂移）；kind → 模型的映射
-    (`_KIND_MODEL`) 留本地（模型不进注册表）。
+    """结构校验侧的模型选择：kind 走取证解析（数据形状优先，见 `resolve_script_kind`）。
 
-    判别**数据形状优先**(详见 `resolve_script_kind` docstring):video_units 唯一存在时才路由
-    reference,否则按 content_mode → segments/scenes(空场景 drama 仍走 DramaEpisodeScript)。
     ``generation_mode`` 不参与判别——caller 端的生成路径(enqueue_videos 等)自己按
     generation_mode 分流;此函数只决定**结构校验**用哪个 Pydantic 模型。
     """
-    return _KIND_MODEL[resolve_script_kind(script)]
+    return model_for_kind(resolve_script_kind(script), script.get("content_mode"))
 
 
 def _format_error(err: ErrorDetails) -> str:

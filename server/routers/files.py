@@ -27,6 +27,7 @@ from lib.episode_paths import (
     REFERENCE_VIDEO_STEP1_LEGACY_FILENAME,
     STEP1_FILENAMES,
     episode_drafts_dir,
+    has_step1,
     step1_read_candidates,
 )
 from lib.i18n import Translator
@@ -768,7 +769,7 @@ def _get_step_files(content_mode: str, generation_mode: str | None = None) -> di
     的结构化 step1 文件名（未知 content_mode 兜底 drama）。结构化文件名取自单一真相源
     STEP1_FILENAMES，新增 content_mode 自动覆盖。
     """
-    if content_mode == "ad":
+    if not has_step1(content_mode):
         return {}
     if generation_mode == "reference_video":
         return {1: REFERENCE_VIDEO_STEP1_FILENAME}

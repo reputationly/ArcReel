@@ -27,6 +27,7 @@ async def _derive_provider_id_for_enqueue(
     payload: dict[str, Any] | None,
     task_type: str,
     media_type: str,
+    resource_id: str | None = None,
 ) -> str | None:
     """入队时按 project + payload 派生 provider_id，供 claim SQL 池过滤使用。
 
@@ -35,6 +36,10 @@ async def _derive_provider_id_for_enqueue(
     claim 后做二次校验，比硬塞一个可能错误的 provider 安全。
     """
     is_video = media_type == "video" or task_type in ("video", "reference_video")
+    # music / singing 必须在 audio 之前判定：它们的 media_type 就是 audio（共用同一条
+    # worker 并发通道），放在 is_audio 之后永远命中不到，会用 TTS 的 provider 去认领与限流
+    # ——TTS 在厂商托管、音乐在自建网关时，音乐任务会去占 TTS 供应商的并发额度。
+    is_music = task_type in ("music", "singing")
     is_audio = media_type == "audio" or task_type == "tts"
     try:
         from lib.config.resolver import ConfigResolver, get_project_manager
@@ -46,7 +51,17 @@ async def _derive_provider_id_for_enqueue(
 
         resolver = ConfigResolver(async_session_factory)
         if is_video:
-            resolved = await resolver.resolve_video_backend(project, payload or {})
+            # MV 演唱镜与普通镜同为 task_type="video"，却走 default_lip_sync_backend。
+            # 派生侧不跟着分流的话，任务会排进常规视频供应商的并发池、实际请求打到口型驱动
+            # 供应商——并发账目对不上，重启后 resume 还会锁错 provider。判据与执行层同源。
+            from lib.lip_sync import task_is_lip_sync
+
+            if await asyncio.to_thread(task_is_lip_sync, project_name, project, payload, resource_id):
+                resolved = await resolver.resolve_lip_sync_backend(project, payload or {})
+            else:
+                resolved = await resolver.resolve_video_backend(project, payload or {})
+        elif is_music:
+            resolved = await resolver.resolve_music_backend(project, payload or {}, task_type=task_type)
         elif is_audio:
             resolved = await resolver.resolve_audio_backend(project, payload or {})
         else:
@@ -131,6 +146,7 @@ class GenerationQueue:
                 payload=payload,
                 task_type=task_type,
                 media_type=media_type,
+                resource_id=resource_id,
             )
 
         async with self._task_repo() as repo:

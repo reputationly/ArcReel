@@ -225,6 +225,7 @@ class TestEndpointCatalog:
             "kling-image",
             "kling-video",
             "openai-tts",
+            "newapi-music",
         }
 
     def test_descriptor_shape(self, client: TestClient):

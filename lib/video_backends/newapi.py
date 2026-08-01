@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 from pathlib import Path
 
@@ -68,6 +69,59 @@ def supports_frame_interpolation(model: str) -> bool:
     return (model or "").strip().lower() in _INTERPOLATION_MODELS
 
 
+# ---------------------------------------------------------------------------
+# gpustackplus 自建渠道方言
+#
+# NewAPI 生态里图片入参有两套并存的写法（见 generate() 内注释），本 backend 对通用中转
+# 两套都发。但自建 gpustackplus 渠道有第三套、且互斥：它按 ``metadata.task_type`` 分派
+# 输入契约，键名逐类型不同，且门面维护一张「原始输入字段」剥离表——把 image / last_frame /
+# src_ref_images 这些裸键塞进请求体会被**整单 400**（见 new-api 仓
+# relay/channel/task/gpustackplus/adaptor.go 的 legacyInputKeys）。
+#
+# 故命中自建模型时改走本方言：只发 images[] + metadata.task_type，由门面按 task_type
+# 物化成引擎入参。判定按模型名白名单而非 base_url——同一个网关可同时挂自建与第三方模型。
+# ---------------------------------------------------------------------------
+
+#: 自建 gpustackplus 引擎的模型名（精确匹配）。子串匹配会误伤同名不同货的第三方模型
+#: （如阿里云的 wan2.2-i2v-plus），与 _INTERPOLATION_MODELS 同一理由。
+_GPUSTACK_MODELS = frozenset(
+    {
+        "wan2.2-t2v",
+        "wan2.2-i2v",
+        "bernini",
+        "infinitetalk-480p",
+        "infinitetalk-720p",
+        "seedvr2",
+    }
+)
+
+#: 支持首尾帧的自建模型：task_type=flf2v，images=[首帧, 尾帧]（门面强制两张）。
+_GPUSTACK_FLF2V_MODELS = frozenset({"wan2.2-i2v"})
+
+#: 支持纯参考图生视频的自建模型：task_type=r2v，参考图走 metadata.src_ref_images。
+#: Bernini 另有 v2v / rv2v（需源视频），本 backend 暂不涉及——ArcReel 没有「源视频」这一输入。
+_GPUSTACK_R2V_MODELS = frozenset({"bernini"})
+
+#: 支持口型驱动（数字人）的自建模型：task_type=s2v，人物图走 images[0]、驱动音频走
+#: metadata.audio。InfiniteTalk 按分辨率分两个模型，能力相同。
+_GPUSTACK_S2V_MODELS = frozenset({"infinitetalk-480p", "infinitetalk-720p"})
+
+
+def supports_lip_sync(model: str) -> bool:
+    """model 是否支持口型驱动（s2v）。MV 的演唱镜头据此选模型。"""
+    return (model or "").strip().lower() in _GPUSTACK_S2V_MODELS
+
+
+#: Bernini 参考图张数上限。门面未声明硬上限，取与 Seedance 2.0 同档的保守值；
+#: 用户可在自定义供应商的「参考图上限」栏覆盖（见 CAPABILITY_OVERRIDE_ALLOWLIST）。
+_BERNINI_MAX_REFERENCE_IMAGES = 4
+
+
+def is_gpustack_model(model: str) -> bool:
+    """model 是否为自建 gpustackplus 引擎（决定走 task_type 方言还是通用中转写法）。"""
+    return (model or "").strip().lower() in _GPUSTACK_MODELS
+
+
 def _is_seedance(model: str) -> bool:
     return "seedance" in model
 
@@ -116,11 +170,21 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
     def video_capabilities_for_model(model: str) -> VideoCapabilities:
         """按 model_id 纯计算 caps —— 不构造 SDK client（无需 api_key）。
 
-        中转端点本身只是转发，能力取决于网关背后挂的模型。Seedance 家族支持首尾帧，
-        2.0 另外支持多模态参考图（1~9 张，与首帧模式互斥）；其余模型保持保守默认，
-        避免请求发出去才被上游拒。instance property 委托至此，保持 backend 为单一真相源。
+        中转端点本身只是转发，能力取决于网关背后挂的模型。三类分别声明：
+
+        - 自建 gpustackplus 引擎：能力按门面的 task_type 契约展开（wan2.2-i2v 支持
+          首尾帧走 flf2v、bernini 支持纯参考图走 r2v）；
+        - Seedance 家族：支持首尾帧，2.0 另外支持多模态参考图（1~9 张，与首帧模式互斥）；
+        - 其余（未知第三方中转）：保守默认，避免请求发出去才被上游拒。
+
+        instance property 委托至此，保持 backend 为单一真相源。
         """
         name = (model or "").lower()
+        if is_gpustack_model(name):
+            return VideoCapabilities(
+                last_frame=name in _GPUSTACK_FLF2V_MODELS,
+                max_reference_images=(_BERNINI_MAX_REFERENCE_IMAGES if name in _GPUSTACK_R2V_MODELS else 0),
+            )
         if not _is_seedance(name):
             return VideoCapabilities(max_reference_images=0)
         if _is_seedance_2(name):
@@ -155,24 +219,32 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
         if request.frame_interpolation and supports_frame_interpolation(self._model):
             metadata["target_fps"] = _INTERPOLATION_TARGET_FPS
 
+        # 口型驱动：驱动音频非空即走 s2v。必须在图片装配之前判定——s2v 的人物图走
+        # images[0]、与 i2v 的首帧同槽，但 task_type 不同，装配后再改会与下面的分派打架。
+        if request.driving_audio is not None:
+            self._apply_lip_sync(metadata, request.driving_audio)
+
         images, image_role = self._collect_images(request)
         if images:
-            # 图片入参在 NewAPI 生态里有两套并存的写法，都发，谁认哪套各取所需：
-            #   1. 顶层 images[] + metadata.image_role —— 上游 new-api 的统一任务契约
-            #      （TaskSubmitReq.Images，role 按位置推断，image_role 显式钉住语义）；
-            #   2. image + metadata.image_tail / metadata.image_urls —— 中转站事实标准，
-            #      入参只有 image 与 metadata 黑盒，尾帧沿用可灵的 image_tail、参考数组沿用
-            #      即梦的 image_urls（见 docs/research/arcreel-video-api-protocol-research.md
-            #      §2.2 与参数对齐表 NewAPI 列）。
-            # 只发第 1 套的话，中转站部署会看不到尾帧/参考图 —— 能力宣称支持、生成却不受约束。
-            payload["images"] = images
-            if image_role is None:
-                payload["image"] = images[0]
-                if len(images) > 1:
-                    metadata["image_tail"] = images[1]
+            if is_gpustack_model(self._model):
+                self._apply_gpustack_images(payload, metadata, images, image_role)
             else:
-                metadata["image_role"] = image_role
-                metadata["image_urls"] = images
+                # 图片入参在 NewAPI 生态里有两套并存的写法，都发，谁认哪套各取所需：
+                #   1. 顶层 images[] + metadata.image_role —— 上游 new-api 的统一任务契约
+                #      （TaskSubmitReq.Images，role 按位置推断，image_role 显式钉住语义）；
+                #   2. image + metadata.image_tail / metadata.image_urls —— 中转站事实标准，
+                #      入参只有 image 与 metadata 黑盒，尾帧沿用可灵的 image_tail、参考数组沿用
+                #      即梦的 image_urls（见 docs/research/arcreel-video-api-protocol-research.md
+                #      §2.2 与参数对齐表 NewAPI 列）。
+                # 只发第 1 套的话，中转站部署会看不到尾帧/参考图 —— 能力宣称支持、生成却不受约束。
+                payload["images"] = images
+                if image_role is None:
+                    payload["image"] = images[0]
+                    if len(images) > 1:
+                        metadata["image_tail"] = images[1]
+                else:
+                    metadata["image_role"] = image_role
+                    metadata["image_urls"] = images
         if metadata:
             payload["metadata"] = metadata
 
@@ -184,6 +256,70 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
             logger.info("NewAPI 任务创建: task_id=%s", provider_task_id)
             await self._persist_provider_job_id(request, provider_task_id, provider=PROVIDER_NEWAPI)
             return await self._poll_and_build(client, provider_task_id, request, is_resume=False)
+
+    def _apply_lip_sync(self, metadata: dict, driving_audio: Path) -> None:
+        """装配口型驱动入参：task_type=s2v + metadata.audio。
+
+        音频编码成 data-uri 由门面物化到 input_refs——裸键 ``audio`` 混进请求体会被
+        门面当作「原始输入字段」整单 400（与图片入参同一机制）。
+
+        模型不支持 s2v 时只告警不改写：能力门控在上层（executor 按模型能力选路），
+        backend 二次否决会让用户显式配置的模型被静默降级成无声视频——口型对不上的
+        演唱镜头比直接报错更难发现。
+        """
+        if not supports_lip_sync(self._model):
+            logger.warning("模型 %s 未登记 s2v 能力，驱动音频可能不被门面接受", self._model)
+        metadata["task_type"] = "s2v"
+        metadata["audio"] = self._encode_audio(driving_audio)
+
+    @staticmethod
+    def _encode_audio(path: Path) -> str:
+        """驱动音频编码成 data-uri。文件不存在直接抛——静默跳过会产出一段口型乱动的视频。"""
+        if not path.exists():
+            raise FileNotFoundError(f"驱动音频不存在: {path}")
+        payload = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:audio/wav;base64,{payload}"
+
+    def _apply_gpustack_images(
+        self,
+        payload: dict,
+        metadata: dict,
+        images: list[str],
+        image_role: str | None,
+    ) -> None:
+        """按自建门面的 task_type 契约装配图片入参。
+
+        与通用中转的「两套都发」相反，这里**只能发一套**：门面对 image / last_frame /
+        src_ref_images 等裸键有剥离表，混发会整单 400（adaptor.go 的 legacyInputKeys）。
+        输入统一走顶层 ``images[]``，由 ``metadata.task_type`` 决定门面如何物化：
+
+        - 首帧（1 张）→ i2v，由模型名推断，无需显式 task_type；
+        - 首尾帧（2 张）→ **flf2v 必须显式指定**（模型名只能推断出 i2v，那条分支不读
+          images[1]，尾帧会被静默丢弃——声明支持尾帧却不受约束是最坏的一种失败）；
+        - 纯参考图 → **r2v 必须显式指定**，且参考图走 metadata.src_ref_images
+          （bernini 由模型名推断出的是 v2v，那要源视频，我们没有）。
+        """
+        payload["images"] = images
+        model = (self._model or "").strip().lower()
+
+        if image_role is not None:
+            # 参考直出：仅 r2v 能力的模型走得通。门面对 r2v 从 metadata.src_ref_images 取图，
+            # 顶层 images 同时保留——HasImage() 据它判定「有输入」，缺了会被输入防呆拒。
+            metadata["task_type"] = "r2v"
+            metadata["src_ref_images"] = images
+            if model not in _GPUSTACK_R2V_MODELS:
+                # 能力守卫在 executor 侧（参考图被裁空即中止），走到这里说明能力声明与
+                # 模型不符；不静默改写语义，留一条 warning 供排查。
+                logger.warning("模型 %s 未登记 r2v 能力，参考图可能不被门面接受", self._model)
+            return
+
+        if len(images) > 1:
+            if model in _GPUSTACK_FLF2V_MODELS:
+                metadata["task_type"] = "flf2v"
+            else:
+                # 门面 i2v 分支只读 images[0]，多传的尾帧会被静默丢弃。宁可显式告警，
+                # 也不让「界面声明支持尾帧、成片却没有尾帧约束」这种无声降级发生。
+                logger.warning("模型 %s 未登记 flf2v 能力，尾帧将被门面忽略", self._model)
 
     def _collect_images(self, request: VideoGenerationRequest) -> tuple[list[str], str | None]:
         """把图片输入编码成 data-uri 列表，并给出显式 role（None = 按首帧/首尾帧语义）。
@@ -327,7 +463,7 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
             headers=self._headers(),
         )
         resp.raise_for_status()
-        return _normalize_task_state(resp.json())
+        return normalize_newapi_task_state(resp.json())
 
     @staticmethod
     @with_retry_async(
@@ -369,8 +505,12 @@ _STATUS_ALIASES: dict[str, str] = {
 }
 
 
-def _normalize_task_state(payload: object) -> dict:
+def normalize_newapi_task_state(payload: object) -> dict:
     """把查询回包统一成 {status, url, metadata, error} —— 上层只认这一种形状。
+
+    **音乐/歌声后端复用本函数**（``lib.audio_backends.newapi_music``）：它们打的是同一个
+    ``/v1/video/generations`` 任务端点，回包形状自然相同。各写一份必然漂移——信封分支就是
+    第一次漂移的地方（音乐侧曾只认扁平形态，导致任务永远等不到终态、轮询到超时）。
 
     NewAPI 的 ``GET /v1/video/generations/{id}`` 有两种回包:
 

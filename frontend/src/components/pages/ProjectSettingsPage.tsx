@@ -19,6 +19,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useWarnUnsaved } from "@/hooks/useWarnUnsaved";
 import { normalizeMode, type GenerationMode } from "@/utils/generation-mode";
 import { getProjectDisplayName } from "@/utils/project-display";
+import { disabledGenerationModes, hasDefaultDuration } from "@/utils/content-mode";
 
 function deriveStyleValue(project: Record<string, unknown>, projectName: string): StylePickerValue {
   const styleImage = project.style_image as string | undefined;
@@ -413,8 +414,8 @@ export function ProjectSettingsPage() {
         text_backend_complex: textComplex || null,
         aspect_ratio: aspectRatio || undefined,
         generation_mode: generationMode,
-        // ad 项目禁写 default_duration（后端对字段出现本身返回 400），省略该键
-        ...(contentMode === "ad" ? {} : { default_duration: defaultDuration }),
+        // 不持有该字段的模式（ad / mv）禁写 default_duration（后端对字段出现本身返回 400），省略该键
+        ...(hasDefaultDuration(contentMode) ? { default_duration: defaultDuration } : {}),
         model_settings: newModelSettings,
       });
       setModelSettings(newModelSettings);
@@ -593,7 +594,7 @@ export function ProjectSettingsPage() {
                   videoGenerateAudio={audioOverride}
                   onVideoGenerateAudioChange={setAudioOverride}
                   usesReferenceImages={generationMode === "reference_video"}
-                  enable={contentMode === "ad" ? { duration: false } : undefined}
+                  enable={hasDefaultDuration(contentMode) ? undefined : { duration: false }}
                 />
               </SectionCard>
 
@@ -650,7 +651,7 @@ export function ProjectSettingsPage() {
                   <GenerationModeSelector
                     value={generationMode}
                     onChange={setGenerationMode}
-                    disabledModes={contentMode === "ad" ? ["grid"] : undefined}
+                    disabledModes={disabledGenerationModes(contentMode)}
                   />
                 </fieldset>
               </SectionCard>

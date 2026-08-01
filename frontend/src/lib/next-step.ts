@@ -18,6 +18,7 @@ import type { ProjectData } from "@/types";
 export type NextStepId =
   | "upload_source"
   | "fill_product"
+  | "write_song"
   | "generate_script"
   | "complete_assets"
   | "generate_storyboards"
@@ -67,11 +68,12 @@ export function deriveNextStep(project: ProjectData | null | undefined): NextSte
 
   if (phase === "completed") return { id: "export", manual: true };
 
-  // 起点因内容模式而异：广告项目不导入源文件，它的起点是产品信息与创作 brief（筹备页表单）。
+  // 起点因内容模式而异：广告项目不导入源文件，它的起点是产品信息与创作 brief（筹备页表单）；
+  // MV 的起点是写歌——song 与 lyrics 存在剧本顶层，而镜头表要按实测曲长来排，没有歌就排不了镜头。
   if (phase === "setup") {
-    return project.content_mode === "ad"
-      ? { id: "fill_product", manual: true }
-      : { id: "upload_source", manual: true };
+    if (project.content_mode === "ad") return { id: "fill_product", manual: true };
+    if (project.content_mode === "mv") return { id: "write_song", manual: true };
+    return { id: "upload_source", manual: true };
   }
 
   if (phase === "worldbuilding") return { id: "generate_script", manual: false };

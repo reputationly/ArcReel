@@ -16,6 +16,7 @@ import type {
   NarrationSegment,
   DramaScene,
   AdShot,
+  MVShot,
   ImagePrompt,
   VideoPrompt,
   Dialogue,
@@ -45,9 +46,11 @@ import {
   isStructuredVideoPrompt,
 } from "@/utils/prompt-shape";
 import { isContinuousIntegerRange } from "@/utils/duration_format";
+import { getScriptItemCharacters, shotTextFieldFor } from "@/utils/script-shape";
 
-type Segment = NarrationSegment | DramaScene | AdShot;
-type DetailContentMode = "narration" | "drama" | "ad";
+type Segment = NarrationSegment | DramaScene | AdShot | MVShot;
+// mv 与 ad 的镜头详情形状相同（平铺 shots + shot_id），详情面板复用同一路径。
+type DetailContentMode = "narration" | "drama" | "ad" | "mv";
 type ImagePromptValue = ImagePrompt | string;
 type VideoPromptValue = VideoPrompt | string;
 
@@ -95,9 +98,9 @@ function getNovelText(seg: Segment, mode: DetailContentMode): string {
 interface DraftState {
   image_prompt: ImagePromptValue;
   video_prompt: VideoPromptValue;
-  /** 仅 ad 模式：一等口播文案草稿 */
-  voiceover_text?: string;
-  /** 仅 ad 模式：带货框架段落标签草稿 */
+  /** 有镜头级一等文案的模式（ad 口播 / mv 歌词行）：文案草稿。落库字段名见 shotTextFieldFor */
+  shot_text?: string;
+  /** 同上：段落标签草稿（ad 的带货框架段落 / mv 的歌曲段落） */
   section?: string;
   /** 仅 drama 模式：场景级有序发声序列草稿（台词 + 画外音） */
   utterances?: Utterance[];
@@ -126,8 +129,8 @@ const utterancesSig = (list: Utterance[]): string => stableSig(list.map(canonica
 function baselineDraft(
   ip: ImagePromptValue,
   vp: VideoPromptValue,
-  isAd: boolean,
-  voiceover: string,
+  hasShotText: boolean,
+  shotText: string,
   section: string,
   isDrama: boolean,
   utterances: Utterance[],
@@ -135,17 +138,17 @@ function baselineDraft(
   return {
     image_prompt: ip,
     video_prompt: vp,
-    ...(isAd ? { voiceover_text: voiceover, section } : {}),
+    ...(hasShotText ? { shot_text: shotText, section } : {}),
     ...(isDrama ? { utterances } : {}),
   };
 }
 
 /** 草稿等值签名：与上游基线签名同键形状（漂移会让"干净草稿静默跟随上游"失效）。 */
-function draftSig(d: DraftState, isAd: boolean, isDrama: boolean): string {
+function draftSig(d: DraftState, hasShotText: boolean, isDrama: boolean): string {
   return stableSig({
     ip: d.image_prompt,
     vp: d.video_prompt,
-    ...(isAd ? { voiceover_text: d.voiceover_text ?? "", section: d.section ?? "" } : {}),
+    ...(hasShotText ? { shot_text: d.shot_text ?? "", section: d.section ?? "" } : {}),
     ...(isDrama ? { utterances: (d.utterances ?? EMPTY_UTTERANCES).map(canonicalUtterance) } : {}),
   });
 }
@@ -445,9 +448,15 @@ export function ShotDetail({
   const vp = segment.video_prompt;
   const note = segment.note ?? "";
   const isAd = contentMode === "ad";
+  // ad / mv 都有「镜头级一等文案 + 段落标签」，只是字段名不同；草稿层按同一形状处理，
+  // 落库时才用 shotTextField 还原真实字段名——两处各写一份分派是这条链最容易漏掉 mv 的地方。
+  const shotTextField = shotTextFieldFor(contentMode);
+  const hasShotText = shotTextField !== null;
+  const shotLike = hasShotText ? (segment as AdShot | MVShot) : null;
   const adShot = isAd ? (segment as AdShot) : null;
-  const upstreamVoiceover = adShot?.voiceover_text ?? "";
-  const upstreamSection = adShot?.section ?? "";
+  const upstreamShotText =
+    (shotTextField === "lyrics_line" ? (shotLike as MVShot | null)?.lyrics_line : adShot?.voiceover_text) ?? "";
+  const upstreamSection = shotLike?.section ?? "";
   const isDrama = contentMode === "drama";
   const dramaScene = isDrama ? (segment as DramaScene) : null;
   // drama 场景级发声序列（迁移后存量数据可能缺省，读到空即无发声）。
@@ -457,7 +466,7 @@ export function ShotDetail({
   // 在切镜头时硬重置整个组件，所以这里只需处理"上游同字段静默更新"的情况。
   // 备注不进入草稿，由 NotesDrawer 收起时直接落库。
   const [draft, setDraft] = useState<DraftState>(() =>
-    baselineDraft(ip, vp, isAd, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances),
+    baselineDraft(ip, vp, hasShotText, upstreamShotText, upstreamSection, isDrama, upstreamUtterances),
   );
   const [saving, setSaving] = useState(false);
   const [uploadingKind, setUploadingKind] = useState<"storyboard" | "video" | null>(null);
@@ -491,11 +500,11 @@ export function ShotDetail({
   const upstreamSig = useMemo(
     () =>
       draftSig(
-        baselineDraft(ip, vp, isAd, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances),
-        isAd,
+        baselineDraft(ip, vp, hasShotText, upstreamShotText, upstreamSection, isDrama, upstreamUtterances),
+        hasShotText,
         isDrama,
       ),
-    [isAd, ip, vp, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances],
+    [hasShotText, ip, vp, upstreamShotText, upstreamSection, isDrama, upstreamUtterances],
   );
   // 上游发声序列签名单独记忆化：dirtyPatch 随每次 keystroke 重算，
   // 但上游极少变，避免逐键重复序列化整个 upstreamUtterances。
@@ -505,8 +514,8 @@ export function ShotDetail({
   // 免去 useEffect 的额外渲染周期与依赖项管理。draft 直接读当前渲染值，无需 ref 镜像。
   const [syncedUpstreamSig, setSyncedUpstreamSig] = useState(upstreamSig);
   if (syncedUpstreamSig !== upstreamSig) {
-    if (draftSig(draft, isAd, isDrama) === syncedUpstreamSig) {
-      setDraft(baselineDraft(ip, vp, isAd, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances));
+    if (draftSig(draft, hasShotText, isDrama) === syncedUpstreamSig) {
+      setDraft(baselineDraft(ip, vp, hasShotText, upstreamShotText, upstreamSection, isDrama, upstreamUtterances));
     }
     setSyncedUpstreamSig(upstreamSig);
   }
@@ -524,11 +533,9 @@ export function ShotDetail({
       stableSig(draft.video_prompt) !== stableSig(vp)
     )
       patch.video_prompt = draft.video_prompt;
-    if (isAd) {
-      if ((draft.voiceover_text ?? "") !== upstreamVoiceover)
-        patch.voiceover_text = draft.voiceover_text ?? "";
-      if ((draft.section ?? "") !== upstreamSection)
-        patch.section = draft.section ?? "";
+    if (shotTextField) {
+      if ((draft.shot_text ?? "") !== upstreamShotText) patch[shotTextField] = draft.shot_text ?? "";
+      if ((draft.section ?? "") !== upstreamSection) patch.section = draft.section ?? "";
     }
     if (isDrama) {
       const draftUtterances = draft.utterances ?? EMPTY_UTTERANCES;
@@ -536,7 +543,17 @@ export function ShotDetail({
         patch.utterances = draftUtterances;
     }
     return patch;
-  }, [draft, ip, vp, isAd, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances, upstreamUtterancesSig]);
+  }, [
+    draft,
+    ip,
+    vp,
+    shotTextField,
+    upstreamShotText,
+    upstreamSection,
+    isDrama,
+    upstreamUtterances,
+    upstreamUtterancesSig,
+  ]);
 
   const dirty = Object.keys(dirtyPatch).length > 0;
 
@@ -607,7 +624,7 @@ export function ShotDetail({
 
   const handleCancel = () => {
     if (saving) return;
-    setDraft(baselineDraft(ip, vp, isAd, upstreamVoiceover, upstreamSection, isDrama, upstreamUtterances));
+    setDraft(baselineDraft(ip, vp, hasShotText, upstreamShotText, upstreamSection, isDrama, upstreamUtterances));
   };
 
   const sbEstimate = segCost?.estimate?.image;
@@ -619,12 +636,9 @@ export function ShotDetail({
 
   const dirtyHint = t("shot_detail_save_first");
 
-  const characterNames =
-    contentMode === "drama"
-      ? (segment as DramaScene).characters_in_scene ?? []
-      : contentMode === "ad"
-        ? (segment as AdShot).characters_in_shot ?? []
-        : (segment as NarrationSegment).characters_in_segment ?? [];
+  // 与 ReferencesSection 存回时用的 charactersFieldFor 同源：三元分派漏掉 mv 会让演唱镜的
+  // 引用弹窗以空列表开局，一存就把 characters_in_shot 清空。
+  const characterNames = getScriptItemCharacters(segment, contentMode);
   const sceneNames = segment.scenes ?? [];
   const propNames = segment.props ?? [];
   // 展示用去重：products_in_shot 无唯一性约束（同一产品多次入画合法），重复名直接作 key 会撞
@@ -644,7 +658,7 @@ export function ShotDetail({
 
   const leftColumn = (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto px-3.5 pb-5 pt-3.5">
-      {isAd && (
+      {hasShotText && (
         <>
           <div>
             <label
@@ -661,15 +675,18 @@ export function ShotDetail({
               value={draft.section ?? ""}
               onChange={(e) => setDraft((d) => ({ ...d, section: e.target.value }))}
               readOnly={refsReadOnly}
-              placeholder={t("detail_shot_section_placeholder")}
+              placeholder={t(isAd ? "detail_shot_section_placeholder" : "detail_mv_section_placeholder")}
               className="prompt-ta"
               style={{ minHeight: 0 }}
             />
-            <datalist id={`shot-section-options-${segmentId}`}>
-              {AD_SECTION_VALUES.map((v) => (
-                <option key={v} value={v} />
-              ))}
-            </datalist>
+            {/* 候选值只对 ad 成立：mv 的段落名来自这首歌自己的 song.sections，没有通用枚举 */}
+            {isAd && (
+              <datalist id={`shot-section-options-${segmentId}`}>
+                {AD_SECTION_VALUES.map((v) => (
+                  <option key={v} value={v} />
+                ))}
+              </datalist>
+            )}
           </div>
 
           <div>
@@ -679,20 +696,20 @@ export function ShotDetail({
                 className="text-[10.5px] font-bold uppercase"
                 style={sectionHeaderStyle}
               >
-                {t("detail_section_voiceover")}
+                {t(isAd ? "detail_section_voiceover" : "detail_section_lyrics_line")}
               </label>
               <span className="flex-1" />
               <span className="num text-[10px]" style={{ color: "var(--color-text-4)" }}>
-                {t("detail_field_chars_count", { count: (draft.voiceover_text ?? "").length })}
+                {t("detail_field_chars_count", { count: (draft.shot_text ?? "").length })}
               </span>
             </div>
             <textarea
               id={`shot-voiceover-${segmentId}`}
               className="prompt-ta"
-              value={draft.voiceover_text ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, voiceover_text: e.target.value }))}
+              value={draft.shot_text ?? ""}
+              onChange={(e) => setDraft((d) => ({ ...d, shot_text: e.target.value }))}
               readOnly={refsReadOnly}
-              placeholder={t("detail_voiceover_placeholder")}
+              placeholder={t(isAd ? "detail_voiceover_placeholder" : "detail_lyrics_line_placeholder")}
               style={{ minHeight: 96 }}
             />
           </div>

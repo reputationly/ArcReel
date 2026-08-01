@@ -16,6 +16,20 @@ _DEFAULT_VIDEO_BACKEND = "gemini-aistudio/veo-3.1-lite-generate-preview"
 _DEFAULT_IMAGE_BACKEND = "gemini-aistudio/gemini-3.1-flash-image-preview"
 _DEFAULT_TEXT_BACKEND = "gemini-aistudio/gemini-3-flash-preview"
 _DEFAULT_AUDIO_BACKEND = "dashscope/qwen3-tts-flash"
+# 音乐与歌声后端**无内置默认值**（空串 = 未配置）。
+#
+# 这两类模型（ACE-Step / SoulX-Singer）都是自建部署，经**自定义供应商**接入——
+# provider_id 形如 ``custom-N``，而 ``newapi`` 这个裸 id 不在 PROVIDER_REGISTRY 里，
+# 指向它会让 assemble_backend 抛「no builtin ProviderSpec」，用户看不懂。
+#
+# 故留空，让「未配置」成为可判定的状态：执行器据此给出「请先在设置页配置音乐模型」
+# 的明确指引，而不是把一个必然构造失败的 id 塞进解析链。
+_DEFAULT_MUSIC_BACKEND = ""
+_DEFAULT_SINGING_BACKEND = ""
+# 口型驱动（数字人）后端。同样留空 = 未配置：InfiniteTalk 也是自建部署、经自定义供应商接入，
+# 任何裸 provider id 都构造不出 backend。MV 的演唱镜头用它，其余镜头仍走项目的常规视频模型
+# ——普通图生视频模型没有 s2v 能力，共用一个配置会让演唱镜头的口型对不上且难以察觉。
+_DEFAULT_LIP_SYNC_BACKEND = ""
 # 旁白默认音色（DashScope 预设）；可被 project.json 顶层 narration_voice 或全局 setting 覆盖
 # （与 video_backend 等同走顶层 key，非 settings 子字典）。
 _DEFAULT_NARRATION_VOICE = "Cherry"

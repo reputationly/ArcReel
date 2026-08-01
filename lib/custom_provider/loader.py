@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from lib.audio_backends.base import MusicBackend
 from lib.custom_provider import parse_provider_id
 from lib.custom_provider.backends import (
     CustomAudioBackend,
@@ -36,7 +37,7 @@ async def load_custom_backend(
     provider_id: str,
     model_id: str | None,
     media_type: str,
-) -> CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend:
+) -> CustomTextBackend | CustomImageBackend | CustomVideoBackend | CustomAudioBackend | MusicBackend:
     """装载并构造自定义供应商 backend。
 
     media_type 用于校验请求 model 的 endpoint 是否相符、以及回退默认时分组；实际派发以 model.endpoint

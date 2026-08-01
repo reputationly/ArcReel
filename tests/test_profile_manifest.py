@@ -417,7 +417,7 @@ def test_profile_misconfigured_error_is_runtime_error() -> None:
 def test_valid_content_modes_constant() -> None:
     from lib.profile_manifest import VALID_CONTENT_MODES
 
-    assert VALID_CONTENT_MODES == frozenset({"narration", "drama", "ad"})
+    assert VALID_CONTENT_MODES == frozenset({"narration", "drama", "ad", "mv"})
 
 
 # ---------- resolve_profile_files_for_mode ----------
@@ -434,10 +434,12 @@ def _make_profile(tmp_path: Path) -> Path:
     (profile / "CLAUDE.narration.md").write_text("narration top")
     (profile / "CLAUDE.drama.md").write_text("drama top")
     (profile / "CLAUDE.ad.md").write_text("ad top")
+    (profile / "CLAUDE.mv.md").write_text("mv top")
     # SKILL.md 变体配对
     (profile / ".claude" / "skills" / "manga-workflow" / "SKILL.narration.md").write_text("nar skill")
     (profile / ".claude" / "skills" / "manga-workflow" / "SKILL.drama.md").write_text("dra skill")
     (profile / ".claude" / "skills" / "manga-workflow" / "SKILL.ad.md").write_text("ad skill")
+    (profile / ".claude" / "skills" / "manga-workflow" / "SKILL.mv.md").write_text("mv skill")
     return profile
 
 

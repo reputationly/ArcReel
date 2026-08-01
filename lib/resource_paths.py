@@ -40,6 +40,12 @@ _PATTERNS: dict[str, ResourcePattern] = {
     "grids": ResourcePattern("grids", ".png"),
     "reference_videos": ResourcePattern("reference_videos", ".mp4"),
     "audio": ResourcePattern("audio", ".wav", prefix="segment_"),
+    # 音乐是项目级单件产物（一支 MV 一首曲子），不像 audio 那样按分镜逐条产出，
+    # 故无 segment_ 前缀——resource_id 直接是曲目标识（如 "main"）。
+    "music": ResourcePattern("music", ".wav"),
+    # 歌声合成产物。与 music 同目录不同前缀——一支 MV 可能有多条人声轨（主唱/和声），
+    # 而伴奏只有一条；分开命名让二者不互相覆盖。
+    "singing": ResourcePattern("music", ".wav", prefix="vocal_"),
 }
 
 RESOURCE_TYPES: tuple[str, ...] = tuple(_PATTERNS)

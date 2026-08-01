@@ -41,8 +41,10 @@ PRESETS: list[tuple[re.Pattern[str], list[int]]] = [
     (re.compile(r"pixverse|^v[56](\.\d+)?$", re.I), list(range(1, 16))),
     # MiniMax Hailuo（固定 6）
     (re.compile(r"hailuo", re.I), [6]),
-    # Wan
-    (re.compile(r"wan-?\d", re.I), [4, 5]),
+    # Wan。自建 gpustack 部署的 wan2.2 时长由部署方 config 决定（实测 2-7 常见），
+    # 厂商托管版则各家不同。预设取自建实测区间——猜窄的代价是参考直出整条不可用
+    # （unit 时长凑不出合法组合），猜宽只是让上游报一次错。仍以用户手填为准。
+    (re.compile(r"wan-?\d", re.I), list(range(2, 8))),
     # Pika
     (re.compile(r"pika", re.I), [3, 5, 10]),
 ]

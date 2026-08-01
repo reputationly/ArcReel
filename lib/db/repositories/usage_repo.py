@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, get_args
 
 from sqlalchemy import case, func, select, update
 
@@ -32,6 +32,10 @@ PROJECT_LEVEL_SEGMENT_KEY = "\x00__project__"
 # "gemini"（图像/视频侧已是 "gemini-aistudio"）。这些历史行不迁移，仅在分组报表按此表补一个
 # 友好显示名；registry 只登记新格式 key（gemini-aistudio / gemini-vertex），故裸值查不到 meta。
 _LEGACY_PROVIDER_DISPLAY_NAMES = {PROVIDER_GEMINI: "Gemini"}
+
+
+#: 分类计数的口径来源。与 ``lib.providers.CallType`` 同源，新增记账通道自动进统计。
+_CALL_TYPE_VALUES: tuple[str, ...] = get_args(CallType)
 
 
 @dataclass(frozen=True)
@@ -431,10 +435,12 @@ class UsageRepository(BaseRepository):
                     ),
                     0,
                 ).label("total_cost_usd"),
-                func.count(case((ApiCall.call_type == "image", 1))).label("image_count"),
-                func.count(case((ApiCall.call_type == "video", 1))).label("video_count"),
-                func.count(case((ApiCall.call_type == "text", 1))).label("text_count"),
-                func.count(case((ApiCall.call_type == "audio", 1))).label("audio_count"),
+                # 分类计数由 CallType 驱动，不写死字面量：``total_count`` 数的是全部，分类少一种
+                # 就变成「总数含它、分类栏没有」——汇总静默少报，而没有任何一栏显示为 0 来提示。
+                *(
+                    func.count(case((ApiCall.call_type == call_type, 1))).label(f"{call_type}_count")
+                    for call_type in _CALL_TYPE_VALUES
+                ),
                 func.count(case((ApiCall.status == "failed", 1))).label("failed_count"),
                 func.count().label("total_count"),
             )
@@ -467,10 +473,7 @@ class UsageRepository(BaseRepository):
         return {
             "total_cost": round(row.total_cost_usd, 4),
             "cost_by_currency": cost_by_currency,
-            "image_count": row.image_count,
-            "video_count": row.video_count,
-            "text_count": row.text_count,
-            "audio_count": row.audio_count,
+            **{f"{call_type}_count": getattr(row, f"{call_type}_count") for call_type in _CALL_TYPE_VALUES},
             "failed_count": row.failed_count,
             "total_count": row.total_count,
         }

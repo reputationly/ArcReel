@@ -315,4 +315,64 @@ export interface AdEpisodeScript {
   shots: AdShot[];
 }
 
-export type EpisodeScript = NarrationEpisodeScript | DramaEpisodeScript | AdEpisodeScript;
+/** 歌曲段落。MV 的镜头按段落分配，段落表是排镜头的依据。 */
+export interface SongSection {
+  name: string;
+  start_seconds: number;
+  duration_seconds: number;
+}
+
+/** 歌曲元数据。由作曲步骤写回，前端只读不编辑。 */
+export interface SongMeta {
+  style?: string;
+  /** 引擎回包的实测时长，不是申请值——按申请值排镜头会让全片逐渐错位。 */
+  duration_seconds: number;
+  bpm?: number | null;
+  audio_path?: string;
+  sections?: SongSection[];
+}
+
+export interface MVShot {
+  shot_id: string;
+  /** 所属歌曲段落名（intro/verse/chorus/bridge/outro）。 */
+  section: string;
+  /**
+   * 该镜在歌曲时间轴上的绝对入点（秒）。MV 独有——口型、卡点、段落切换都依赖它；
+   * 累加式排布下一镜偏移会让后面全部错位。
+   */
+  start_seconds: number;
+  duration_seconds: DurationSeconds;
+  /** 该镜对应的歌词行；纯器乐段为空串。是字幕来源，不是配音来源。 */
+  lyrics_line?: string;
+  /** 是否人物出镜演唱：决定该镜是否走口型驱动生成。 */
+  is_performance?: boolean;
+  characters_in_shot?: string[];
+  scenes?: string[];
+  props?: string[];
+  image_prompt: ImagePrompt | string;
+  video_prompt: VideoPrompt | string;
+  transition_to_next: TransitionType;
+  note?: string;
+  end_frame_image?: string | null;
+  generated_assets?: GeneratedAssets;
+}
+
+export interface MVEpisodeScript {
+  episode: number;
+  title: string;
+  content_mode: "mv";
+  duration_seconds: number;
+  schema_version?: number;
+  novel: NovelInfo;
+  /** 歌曲元数据；作曲后回写。 */
+  song?: SongMeta;
+  /** 完整歌词。定稿后写入，剧本重新生成不会覆盖它。 */
+  lyrics?: string;
+  shots: MVShot[];
+}
+
+export type EpisodeScript =
+  | NarrationEpisodeScript
+  | DramaEpisodeScript
+  | AdEpisodeScript
+  | MVEpisodeScript;

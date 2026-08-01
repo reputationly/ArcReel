@@ -41,9 +41,29 @@ REFERENCE_VIDEO_STEP1_FILENAME = "step1_reference_units.json"
 #: 写盘与生成侧不认——仅存在旧 ``.md`` 时生成侧给出重跑拆分的明确提示。
 REFERENCE_VIDEO_STEP1_LEGACY_FILENAME = "step1_reference_units.md"
 
+#: 一键生成、无 step1 中间态的 content_mode。创作输入不在 ``drafts/``：ad 取 project.json 的
+#: brief + 产品信息，mv 取剧本顶层的 song + lyrics（歌曲先于剧本存在）。
+#:
+#: 单列一张表而非让各消费方各写一次 ``content_mode == "ad"``：这个事实至少有四个消费方
+#: （MCP 生成前置检查、状态计算的 step1 探测、web 的 step1 文件名映射、剧本生成的分派），
+#: 名单分叉时新模式会被其中若干处按「该有 step1」对待，报出的却是「未找到 Step 1 文件」——
+#: 错误信息指向的是缺文件，真正原因是这个模式压根不该有那个文件，排查方向被带偏。
+NO_STEP1_CONTENT_MODES: frozenset[str] = frozenset({"ad", "mv"})
+
+if NO_STEP1_CONTENT_MODES & STEP1_FILENAMES.keys():
+    # import 期自洽：同一个模式不可能既登记了结构化 step1 文件名、又声明无 step1。
+    raise RuntimeError(
+        f"NO_STEP1_CONTENT_MODES 与 STEP1_FILENAMES 重叠: {NO_STEP1_CONTENT_MODES & STEP1_FILENAMES.keys()}"
+    )
+
+
+def has_step1(content_mode: str | None) -> bool:
+    """该 content_mode 是否存在 step1 中间态（未知 / 缺失按「有」处理，与既有兜底一致）。"""
+    return content_mode not in NO_STEP1_CONTENT_MODES
+
 
 def step1_filename(content_mode: str) -> str | None:
-    """该 content_mode 的结构化 step1 文件名；不走结构化 step1（如 ad）时返回 None。"""
+    """该 content_mode 的结构化 step1 文件名；不走结构化 step1（如 ad / mv）时返回 None。"""
     return STEP1_FILENAMES.get(content_mode)
 
 

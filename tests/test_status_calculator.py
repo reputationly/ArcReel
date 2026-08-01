@@ -101,13 +101,20 @@ class TestStatusCalculator:
         project_root = tmp_path / "projects"
         project_path = project_root / "demo"
 
-        # Case 1: 脚本 JSON 存在 → ("generated", script)
-        script_data = {"content_mode": "narration", "segments": []}
+        # Case 1: 脚本 JSON 存在且有条目 → ("generated", script)
+        script_data = {"content_mode": "narration", "segments": [{"segment_id": "E1S01"}]}
         scripts = {"episode_1.json": script_data}
         calc = StatusCalculator(_FakePM(project_root, {}, scripts))
         status, script = calc._load_episode_script("demo", 1, "scripts/episode_1.json")
         assert status == "generated"
         assert script == script_data
+
+        # Case 1b: 文件在但零条目 → 不算 generated。「文件存在」不等于「剧本已生成」：
+        # 零条目剧本进不了制作，判成 generated 会让项目停在一个空时间线的 production 阶段。
+        empty_scripts = {"episode_1.json": {"content_mode": "narration", "segments": []}}
+        calc_empty = StatusCalculator(_FakePM(project_root, {}, empty_scripts))
+        status_empty, _ = calc_empty._load_episode_script("demo", 1, "scripts/episode_1.json")
+        assert status_empty == "none"
 
         # Case 2: 脚本不存在，draft 文件存在 → ("segmented", None)
         draft_dir = project_path / "drafts" / "episode_2"

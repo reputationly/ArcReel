@@ -1,4 +1,4 @@
-"""音频工具：上传校验用的时长探测。"""
+"""音频工具：上传校验用的时长探测，与按时间窗切片。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _FFPROBE_TIMEOUT_SECONDS = 10.0
+_FFMPEG_TIMEOUT_SECONDS = 60.0
 
 # ffprobe 的 format_name 是逗号分隔的候选容器列表（如 m4a 探测出
 # "mov,mp4,m4a,3gp,3g2,mj2"），按扩展名要求其中必须含指定 token，
@@ -28,9 +29,16 @@ def _ffprobe_available() -> bool:
     return shutil.which("ffprobe") is not None
 
 
+@functools.cache
+def _ffmpeg_available() -> bool:
+    """ffmpeg 可执行文件是否在 PATH 中（独立检查：精简容器可能只装了 ffprobe）。"""
+    return shutil.which("ffmpeg") is not None
+
+
 def _reset_for_tests() -> None:
     """test helper —— 清缓存让 monkeypatch shutil.which 立刻生效。"""
     _ffprobe_available.cache_clear()
+    _ffmpeg_available.cache_clear()
 
 
 async def _run_ffprobe(extra_args: list[str]) -> bytes:
@@ -115,3 +123,60 @@ async def probe_audio_duration_seconds(content: bytes, suffix: str) -> float | N
         return float(duration_out.decode().strip())
     except ValueError:
         raise ValueError("音频文件无法解析") from None
+
+
+async def slice_audio_window(
+    source: Path,
+    output: Path,
+    *,
+    start_seconds: float,
+    duration_seconds: float,
+) -> Path:
+    """把 ``source`` 的 ``[start, start+duration)`` 窗口切成独立文件写到 ``output``。
+
+    与本模块另一半（上传探测）的降级策略相反：**ffmpeg 缺失或切片失败一律抛错，不回退到
+    整轨**。调用方（MV 演唱镜头的口型驱动）拿整轨的后果是画面照常产出、口型对着歌曲开头的
+    歌词，要到看成片才发现且看不出原因；探测类降级只是少一道校验，两者不可同日而语。
+
+    ``-ss`` 放在 ``-i`` 之后走精确解码定位而非关键帧粗定位：口型对齐容不下半秒级偏移，
+    而这里切的是几秒长的窗口，精确定位的额外开销可以忽略。输出统一重编码为 16bit PCM，
+    不用 ``-c copy``——按帧边界对齐的流拷贝会把入点吸附到最近的包边界上。
+    """
+    if start_seconds < 0:
+        raise ValueError(f"切片入点不能为负: {start_seconds}")
+    if duration_seconds <= 0:
+        raise ValueError(f"切片时长必须为正: {duration_seconds}")
+    if not _ffmpeg_available():
+        raise ValueError("需要 ffmpeg 按镜头时间窗切分驱动音频，但它不在 PATH 中：请先安装 ffmpeg")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-t",
+        f"{duration_seconds:.3f}",
+        "-c:a",
+        "pcm_s16le",
+        str(output),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_FFMPEG_TIMEOUT_SECONDS)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        output.unlink(missing_ok=True)
+        raise ValueError("切分驱动音频超时") from None
+
+    if proc.returncode != 0 or not output.is_file():
+        output.unlink(missing_ok=True)
+        detail = stderr.decode(errors="replace").strip().splitlines()
+        raise ValueError(f"切分驱动音频失败: {detail[-1] if detail else f'ffmpeg 退出码 {proc.returncode}'}")
+    return output

@@ -16,6 +16,7 @@ import { WizardStep1Basics, type WizardStep1Value } from "./create-project/Wizar
 import { WizardStep2Models, type WizardStep2Data } from "./create-project/WizardStep2Models";
 import { WizardStep3Style, type WizardStep3Value } from "./create-project/WizardStep3Style";
 import type { ModelConfigValue } from "@/components/shared/ModelConfigSection";
+import { hasDefaultDuration } from "@/utils/content-mode";
 
 // 新建项目对话框 · "Open Reel"
 // 仪式感来自项目大厅的 Darkroom 美学：editorial 衬线 + mono 标尺线 + sprocket 胶片孔。
@@ -276,10 +277,13 @@ export function CreateProjectModal() {
         ...(basics.contentMode === "drama" ? { source_kind: basics.sourceKind } : {}),
         aspect_ratio: basics.aspectRatio,
         generation_mode: basics.generationMode,
-        // ad 不暴露 default_duration（按目标总时长逐镜头规划），改传 target_duration
-        ...(isAd
-          ? { target_duration: basics.targetDuration }
-          : { default_duration: models.defaultDuration }),
+        // 两条独立判定，不写成三元链：target_duration 是 ad 专属创作输入；
+        // 「有没有项目级单镜时长偏好」按模式表判（ad 按目标总时长逐镜规划、mv 由歌曲段落
+        // 决定）。合成一条链的话，新增一个单件成品模式又要在这里手工插一个分支。
+        ...(isAd ? { target_duration: basics.targetDuration } : {}),
+        ...(hasDefaultDuration(basics.contentMode)
+          ? { default_duration: models.defaultDuration }
+          : {}),
         style_template_id: style.mode === "template" ? style.templateId : null,
         video_backend: models.videoBackend || null,
         image_provider_t2i: models.imageBackendT2I || null,
@@ -415,7 +419,7 @@ export function CreateProjectModal() {
               onCancel={handleClose}
               data={step2Data}
               error={step2Error}
-              hideDuration={basics.contentMode === "ad"}
+              hideDuration={!hasDefaultDuration(basics.contentMode)}
               usesReferenceImages={basics.generationMode === "reference_video"}
             />
           )}

@@ -12,6 +12,7 @@ from lib.episode_paths import (
     STEP1_FILENAMES,
     STEP1_LEGACY_FILENAMES,
     episode_drafts_dir,
+    has_step1,
 )
 from lib.path_safety import safe_exists
 from lib.project_manager import effective_mode
@@ -45,7 +46,7 @@ def _draft_candidates(content_mode: str, generation_mode: str | None = None) -> 
     进不了 ``ScriptReviewGate``。旧版自由文本别名仅供读取 / 浏览层兼认（见 episode_paths 注释），
     生成侧遇到会拒绝并提示重跑拆分，此处不纳入——避免误报「已分段」掩盖需要重跑的存量草稿。
     """
-    if content_mode == "ad":
+    if not has_step1(content_mode):
         return ()
     if generation_mode == "reference_video":
         return (REFERENCE_VIDEO_STEP1_FILENAME,)
@@ -208,6 +209,38 @@ class StatusCalculator:
             "videos": {"total": total, "completed": video_done},
         }
 
+    @classmethod
+    def _status_for_loaded_script(cls, script: dict) -> str:
+        """剧本文件已存在时的 script_status —— 「文件在」不等于「剧本已生成」。
+
+        零条目剧本不算 generated：MV 的 song / lyrics 存在剧本**顶层**，写歌必须先落一个空
+        镜头表的骨架（见 ``sdk_tools/patch_song._ensure_mv_script_exists``），而按「文件存在
+        即 generated」判定会让刚写完歌的项目直接跳进 production——时间线空的，引导也不再提示
+        去生成镜头表，用户看到的是一个「已完成到制作阶段」的空项目。规则对所有模式成立：
+        零条目剧本本就不是可用剧本。
+
+        写歌已完成的 MV 记 ``segmented``（等价于其余模式「已分段、可以生成剧本了」），
+        让阶段落在 worldbuilding、引导指向生成剧本。
+        """
+        _, items = cls._select_kind_and_items(script)
+        if items:
+            return "generated"
+        return "segmented" if cls._has_pre_script_input(script) else "none"
+
+    @staticmethod
+    def _has_pre_script_input(script: dict) -> bool:
+        """零条目剧本是否已具备生成镜头表的前置输入。
+
+        只有 MV 会出现这种状态：其余模式的前置输入都在 ``drafts/``，由 ``_draft_candidates``
+        探测（``has_step1("mv")`` 为假正是因为 MV 的前置输入不在 drafts/ 而在剧本顶层）。
+        判据取 ``song.duration_seconds``——它是作曲工具回写的实测时长，也是排镜头的硬约束，
+        有它才真的能进下一步。
+        """
+        if script.get("content_mode") != "mv":
+            return False
+        song = script.get("song")
+        return isinstance(song, dict) and bool(song.get("duration_seconds"))
+
     def _load_episode_script(
         self,
         project_name: str,
@@ -226,10 +259,11 @@ class StatusCalculator:
         ``generation_mode`` 传 effective_mode 解析结果，驱动 rv 项目的草稿探测（见 ``_draft_candidates``）。
         """
         if preloaded_scripts is not None and script_file in preloaded_scripts:
-            return "generated", preloaded_scripts[script_file]
+            script = preloaded_scripts[script_file]
+            return self._status_for_loaded_script(script), script
         try:
             script = self.pm.load_script(project_name, script_file)
-            return "generated", script
+            return self._status_for_loaded_script(script), script
         except FileNotFoundError:
             project_dir = self.pm.get_project_path(project_name)
             try:

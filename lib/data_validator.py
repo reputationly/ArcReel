@@ -26,7 +26,7 @@ from lib.json_io import load_json_or_none
 from lib.path_safety import PathTraversalError, safe_join
 from lib.profile_manifest import VALID_CONTENT_MODES as _VALID_CONTENT_MODES
 from lib.project_manager import VALID_SOURCE_KINDS as _VALID_SOURCE_KINDS
-from lib.project_manager import effective_mode
+from lib.project_manager import ProjectManager, effective_mode
 from lib.script_models import (
     AD_TARGET_DURATION_DRIFT_THRESHOLD,
     REFERENCE_SHOT_DURATION_RANGE,
@@ -105,6 +105,8 @@ class DataValidator:
         "end_frames",
         "videos",
         "audio",
+        # MV 的曲子与人声轨（lib/resource_paths.py 的 music / singing 两个 pattern 同落此目录）。
+        "music",
         "thumbnails",
         "output",
         "versions",
@@ -253,16 +255,42 @@ class DataValidator:
                 errors.append(f"{prefix}: outline 不合法: {_pydantic_error_summary(exc)}")
 
     @staticmethod
-    def _validate_ad_project_fields(
+    def _validate_mode_project_fields(
         project: dict[str, Any],
         content_mode: Any,
         errors: list[str],
     ) -> None:
-        """广告/短片项目的专属字段与恒单集约束。
+        """内容模式的专属字段与恒单集约束。
 
-        target_duration / brief 仅 ad 项目持有；ad 项目不持有 default_duration
-        （镜头按目标总时长预算逐个规划，单镜头偏好无意义），episodes 恒为第 1 集单条。
+        两类约束来源不同：
+
+        - **按模式表判定**（``ProjectManager`` 的 ``NO_DEFAULT_DURATION_MODES`` /
+          ``SINGLE_EPISODE_MODES``）：单镜时长偏好与恒单集，ad 与 mv 同规则。这里必须读同一张表
+          而非另列一份模式名单——创建/PATCH 已按表拒绝，校验器只认 ad 的话，归档导入进来的 MV
+          项目能带着一个之后既不生效也改不掉的 ``default_duration`` 通过校验。
+        - **ad 独有**：target_duration / brief 是广告片的创作输入，其余模式不持有。
         """
+        if project.get("default_duration") is not None and content_mode in ProjectManager.NO_DEFAULT_DURATION_MODES:
+            errors.append(f"{content_mode} 项目不持有 default_duration（ad 按目标总时长逐镜规划，mv 由歌曲段落决定）")
+
+        if content_mode in ProjectManager.SINGLE_EPISODE_MODES:
+            episodes = project.get("episodes")
+            if not isinstance(episodes, list) or (
+                len(episodes) != 1 or not isinstance(episodes[0], dict) or episodes[0].get("episode") != 1
+            ):
+                errors.append(f"{content_mode} 项目 episodes 必须恒为第 1 集单条")
+
+        # 生成方式禁用表同样按模式判定。项目级与集级各查一次：集级覆盖能单独把某一集切到
+        # 本模式不支持的路径，只查项目级会漏掉。effective_mode 对未知值一律回退默认、不报错，
+        # 所以这里读原始值——脏值走既有的「未知即回退」语义，不在此额外报。
+        for label, holder in (
+            ("项目", project),
+            *((f"episodes[{i}]", ep) for i, ep in enumerate(project.get("episodes") or []) if isinstance(ep, dict)),
+        ):
+            declared = holder.get("generation_mode")
+            if declared is not None and not ProjectManager.generation_mode_supported(content_mode, declared):
+                errors.append(f"{label}: {content_mode} 模式不支持生成方式 '{declared}'")
+
         if content_mode != "ad":
             if project.get("target_duration") is not None:
                 errors.append("target_duration 仅广告/短片项目（content_mode=ad）可用")
@@ -279,15 +307,6 @@ class DataValidator:
         brief = project.get("brief")
         if brief is not None and not isinstance(brief, str):
             errors.append("brief 必须是字符串")
-
-        if project.get("default_duration") is not None:
-            errors.append("广告/短片项目不持有 default_duration（镜头时长按 target_duration 预算逐镜头规划）")
-
-        episodes = project.get("episodes")
-        if not isinstance(episodes, list) or (
-            len(episodes) != 1 or not isinstance(episodes[0], dict) or episodes[0].get("episode") != 1
-        ):
-            errors.append("广告/短片项目 episodes 必须恒为第 1 集单条")
 
     def _validate_project_payload(
         self,
@@ -311,7 +330,7 @@ class DataValidator:
         if source_kind is not None and source_kind not in self.VALID_SOURCE_KINDS:
             errors.append(f"source_kind 值无效: '{source_kind}'，必须是 {self.VALID_SOURCE_KINDS}")
 
-        self._validate_ad_project_fields(project, content_mode, errors)
+        self._validate_mode_project_fields(project, content_mode, errors)
 
         if not project.get("style"):
             errors.append("缺少必填字段: style")
@@ -827,17 +846,34 @@ class DataValidator:
         errors: list[str],
         warnings: list[str],
         *,
+        content_mode: str = "ad",
         project_dir: Path | None = None,
         reference_mode: bool = False,
     ) -> None:
-        """验证 shots（ad 模式）：平铺镜头列表，口播文案一等，产品按名字引用。
+        """验证 shots：平铺镜头列表。``ad`` / ``mv`` 共用此骨架，逐条字段按 content_mode 分流。
+
+        两者形状相同（平铺数组 + ``shot_id``）故走同一个 ``shots`` 骨架（见
+        ``lib/script_skeleton.py``），但一等字段不同：ad 的是口播文案与产品引用
+        （``voiceover_text`` / ``products_in_shot``），mv 的是歌曲时间轴上的锚点
+        （``section`` / ``start_seconds`` / ``lyrics_line`` / ``is_performance``）。不分流的话，
+        合法的 MV 剧本会被逐镜报「缺少必填字段 voiceover_text」。
 
         镜头时长约束按生成路径动态切换：storyboard 路径的成员校验在生成 schema 层
         （supported_durations 枚举，校验器拿不到供应商能力、只把关正整数）；
         ``reference_mode=True`` 时按 1-15 自由整数区间校验（与参考视频 Shot 同口径）。
         """
-        if not isinstance(shots, list) or not shots:
-            errors.append("ad 剧本缺少 shots 数组或为空")
+        is_mv = content_mode == "mv"
+        if not isinstance(shots, list):
+            errors.append(f"{content_mode} 剧本缺少 shots 数组或为空")
+            return
+        if not shots:
+            if is_mv:
+                # MV 的 song / lyrics 存在剧本顶层，而镜头表要按实测曲长来排：写歌与排镜头之间
+                # 必然有一段「剧本已存在、shots 仍为空」的中间态（patch_song 代建的骨架就是它）。
+                # 这段窗口内报 error 等于每个新建 MV 项目一落地就是「无效项目」。
+                warnings.append("mv 剧本 shots 为空：歌曲已就位但尚未排镜头，生成剧本后此提示消失")
+            else:
+                errors.append(f"{content_mode} 剧本缺少 shots 数组或为空")
             return
 
         low, high = self.VALID_SHOT_DURATION_RANGE
@@ -864,14 +900,17 @@ class DataValidator:
                     f"reference_video 路径必须是 {low}-{high} 之间的整数"
                 )
 
-            if "voiceover_text" not in shot:
-                errors.append(f"{prefix}: 缺少必填字段 voiceover_text（口播文案，可为空字符串）")
-            elif not isinstance(shot.get("voiceover_text"), str):
-                errors.append(f"{prefix}: voiceover_text 必须是字符串")
+            if is_mv:
+                self._validate_mv_shot_fields(prefix, shot, errors)
+            else:
+                if "voiceover_text" not in shot:
+                    errors.append(f"{prefix}: 缺少必填字段 voiceover_text（口播文案，可为空字符串）")
+                elif not isinstance(shot.get("voiceover_text"), str):
+                    errors.append(f"{prefix}: voiceover_text 必须是字符串")
 
-            section = shot.get("section")
-            if section is not None and not isinstance(section, str):
-                errors.append(f"{prefix}: section 必须是字符串")
+                section = shot.get("section")
+                if section is not None and not isinstance(section, str):
+                    errors.append(f"{prefix}: section 必须是字符串")
 
             self._validate_segment_refs(
                 prefix,
@@ -900,15 +939,18 @@ class DataValidator:
                 field_label="props",
                 kind_label="道具",
             )
-            self._validate_segment_refs(
-                prefix,
-                shot.get("products_in_shot"),
-                project_products,
-                errors,
-                warnings,
-                field_label="products_in_shot",
-                kind_label="产品",
-            )
+            if not is_mv:
+                # 产品引用是广告片专有的一等概念；MV 的镜头没有这个字段，一律校验会让每一镜
+                # 都多出一条「缺少 products_in_shot」的噪声 warning。
+                self._validate_segment_refs(
+                    prefix,
+                    shot.get("products_in_shot"),
+                    project_products,
+                    errors,
+                    warnings,
+                    field_label="products_in_shot",
+                    kind_label="产品",
+                )
 
             if not shot.get("image_prompt"):
                 errors.append(f"{prefix}: 缺少必填字段 image_prompt")
@@ -923,6 +965,34 @@ class DataValidator:
                     errors,
                 )
                 self._validate_end_frame_image(project_dir, prefix, shot, errors)
+
+    @staticmethod
+    def _validate_mv_shot_fields(prefix: str, shot: dict[str, Any], errors: list[str]) -> None:
+        """MV 镜头独有的字段：歌曲时间轴锚点与演唱标记。
+
+        ``start_seconds`` 按 error 而非 warning 处理：MV 的镜头钉在歌曲**绝对时间轴**上，
+        它同时是拼接位置与演唱镜口型驱动音频的切分入点。缺了它整支片子无从排布，也无从判断
+        哪一镜该对哪句词——不是「按默认值继续」能兜住的缺失。
+        """
+        section = shot.get("section")
+        if not section:
+            errors.append(f"{prefix}: 缺少必填字段 section（所属歌曲段落名）")
+        elif not isinstance(section, str):
+            errors.append(f"{prefix}: section 必须是字符串")
+
+        start = shot.get("start_seconds")
+        if start is None:
+            errors.append(f"{prefix}: 缺少必填字段 start_seconds（镜头在歌曲时间轴上的入点）")
+        elif not isinstance(start, (int, float)) or isinstance(start, bool) or start < 0:
+            errors.append(f"{prefix}: start_seconds 值无效 '{start}'，必须是非负数")
+
+        lyrics_line = shot.get("lyrics_line")
+        if lyrics_line is not None and not isinstance(lyrics_line, str):
+            errors.append(f"{prefix}: lyrics_line 必须是字符串（纯器乐段填空串）")
+
+        is_performance = shot.get("is_performance")
+        if is_performance is not None and not isinstance(is_performance, bool):
+            errors.append(f"{prefix}: is_performance 必须是布尔值")
 
     @staticmethod
     def _warn_ad_target_duration_drift(
@@ -1197,22 +1267,27 @@ class DataValidator:
                 set(raw_products.keys()) if isinstance(raw_products, dict) else set(),
                 errors,
                 warnings,
+                content_mode=content_mode if isinstance(content_mode, str) else "ad",
                 project_dir=project_dir,
                 reference_mode=gen_mode == "reference_video",
             )
-            self._warn_ad_target_duration_drift(project, shots, warnings)
-            self._validate_ad_reference_units(
-                episode.get("reference_units"),
-                shots,
-                {
-                    "character": project_characters,
-                    "scene": project_scenes,
-                    "prop": project_props,
-                    "product": set(raw_products.keys()) if isinstance(raw_products, dict) else set(),
-                },
-                errors,
-                warnings,
-            )
+            # 以下两项是广告片专有的：总时长对齐 target_duration、参考直出的 reference_units。
+            # MV 的时长由歌曲决定（不设 target_duration），且不走参考直出路径（见
+            # lib/prompt_builders_mv.py 的守卫），一律跑会产生无意义的报告项。
+            if content_mode != "mv":
+                self._warn_ad_target_duration_drift(project, shots, warnings)
+                self._validate_ad_reference_units(
+                    episode.get("reference_units"),
+                    shots,
+                    {
+                        "character": project_characters,
+                        "scene": project_scenes,
+                        "prop": project_props,
+                        "product": set(raw_products.keys()) if isinstance(raw_products, dict) else set(),
+                    },
+                    errors,
+                    warnings,
+                )
         elif kind == "scenes":
             self._validate_scenes(
                 episode.get("scenes", []),

@@ -88,7 +88,9 @@ export interface ProviderCredential {
   created_at: string;
 }
 
-export type CallType = "image" | "video" | "text" | "audio";
+// music 与 audio 分列（与后端 lib/providers.py::CallType 同口径）：计费维度不同——
+// TTS 按合成字符数、作曲/歌声按产出时长。
+export type CallType = "image" | "video" | "text" | "audio" | "music";
 
 export interface UsageStat {
   provider: string;

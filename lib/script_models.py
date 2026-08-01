@@ -747,25 +747,136 @@ class AdEpisodeScript(BaseModel):
     )
 
 
-#: content_mode → 该模式下"整条口播文案"所在的字段名。
-#:
-#: TTS 生成（``server.services.generation_tasks.execute_tts_task`` 与
-#: ``generate_narration_audio`` 工具）与剪映字幕导出（``jianying_draft_service``）
-#: 共用此表。两处各写一份必然漂移，而漂移的表现是「字幕有词、配音没声」这类
-#: 半残成片——两条链读的是同一份文案，字段名就该只有一处声明。
+# ============ MV 模式（Music Video） ============
+
+
+class SongSection(BaseModel):
+    """歌曲的一个段落。MV 的镜头按段落分配，段落表是排布镜头的依据。"""
+
+    model_config = _STRICT_CONFIG
+
+    name: str = Field(description="段落名（intro/verse/chorus/bridge/outro）")
+    start_seconds: float = Field(ge=0, description="段落在歌曲中的起点（秒）")
+    duration_seconds: float = Field(gt=0, description="段落时长（秒）")
+
+
+class SongMeta(BaseModel):
+    """歌曲元数据。由作曲步骤产出后写回，不由 LLM 编造。
+
+    ``duration_seconds`` 取**引擎回包的实测时长**而非申请值：ACE-Step 的产出未必等于
+    申请秒数，按申请值排镜头会让全片逐渐错位、越到后面偏得越多。
+    """
+
+    model_config = _STRICT_CONFIG
+
+    style: str = Field(default="", description="曲风描述（作曲时用的 prompt）")
+    duration_seconds: float = Field(default=0, ge=0, description="歌曲实测总时长（秒）")
+    bpm: int | None = Field(default=None, description="速度（BPM），未知留空")
+    audio_path: str = Field(default="", description="歌曲文件的项目内相对路径")
+    sections: list[SongSection] = Field(default_factory=list, description="段落表")
+
+
+class MVShot(BaseModel):
+    """MV 模式的镜头。
+
+    与 :class:`AdShot` 的关键差异是 ``start_seconds``——MV 的镜头必须钉在歌曲时间轴的
+    绝对位置上，而不是顺次累加时长。口型、卡点、段落切换都依赖这个绝对位置：累加式排布
+    只要有一个镜头的实际产出时长偏离规划值，后面全部错位，而视频生成的时长本就是按供应商
+    档位取整的，偏离是常态。
+
+    ``is_performance`` 决定该镜是否走口型驱动（歌声音频 + 人物图 → s2v）；其余镜头走
+    常规图生视频。二者产物形态不同，故在剧本层就分流，不留给生成端猜。
+    """
+
+    model_config = _STRICT_CONFIG
+
+    shot_id: str = Field(description="镜头 ID，格式 E{集}S{序号}")
+    section: str = Field(description="所属歌曲段落名（须出现在 song.sections）")
+    start_seconds: float = Field(ge=0, description="镜头在歌曲时间轴上的入点（秒）")
+    duration_seconds: int = Field(ge=1, le=60, description="镜头时长（秒）")
+    lyrics_line: str = Field(default="", description="该镜对应的歌词行；纯器乐段为空串")
+    is_performance: bool = Field(default=False, description="是否人物出镜演唱（决定是否走口型驱动）")
+    characters_in_shot: list[str] = Field(default_factory=list, description="出场角色名称列表")
+    scenes: list[str] = Field(default_factory=list, description="出场场景名称列表")
+    props: list[str] = Field(default_factory=list, description="出场道具名称列表")
+    image_prompt: ImagePrompt = Field(description="分镜图生成提示词")
+    video_prompt: VideoPrompt = Field(description="视频生成提示词")
+    # 见 NarrationSegment.transition_to_next 说明
+    transition_to_next: SkipJsonSchema[TransitionType] = Field(default="cut", description="转场类型")
+    # 见 NarrationSegment 同名字段说明。
+    note: SkipJsonSchema[str | None] = Field(default=None, description="用户备注（不参与生成）")
+    end_frame_image: SkipJsonSchema[str | None] = Field(default=None, description="尾帧快照路径（项目内相对路径）")
+    generated_assets: SkipJsonSchema[GeneratedAssets] = Field(
+        default_factory=GeneratedAssets, description="生成资源状态"
+    )
+
+
+class MVEpisodeScript(BaseModel):
+    """MV 模式剧集脚本（恒单集，与 ad 同）。
+
+    ``song`` 与 ``lyrics`` 是 MV 独有的顶层字段：歌曲先于剧本存在，剧本是按歌排的镜头表。
+    两者都对 LLM 可见（写剧本要读段落表与歌词），但 ``song`` 由作曲步骤写回、不该由 LLM
+    编造，故加 SkipJsonSchema 排除出生成 schema。
+    """
+
+    title: str = Field(description="MV 标题")
+    # 见 NarrationEpisodeScript.content_mode 说明
+    content_mode: SkipJsonSchema[Literal["mv"]] = Field(default="mv", description="内容模式")
+    # 见 NarrationEpisodeScript.duration_seconds 说明。
+    duration_seconds: SkipJsonSchema[int] = Field(default=0, description="总时长（秒）")
+    # 见 NarrationEpisodeScript.novel 说明
+    novel: SkipJsonSchema[NovelInfo] = Field(default_factory=NovelInfo, description="小说来源信息")
+    # 歌曲由作曲步骤产出并写回；LLM 只读不写，故排除出生成 schema。
+    song: SkipJsonSchema[SongMeta] = Field(default_factory=SongMeta, description="歌曲元数据")
+    # 歌词同样排除出生成 schema，但理由不同于 song：歌词是「用户给方向 → agent 优化 →
+    # 用户改定稿」的产物，在排镜头之前就已确定。若让剧本生成一并产出，每次重新生成镜头表
+    # 都会把用户改过的定稿冲掉——而重新生成镜头表是常规操作（改了段落划分、换了视频模型档位
+    # 都要重排）。故歌词由专门的步骤经 patch_episode_script 写入，剧本生成只读它排镜头。
+    lyrics: SkipJsonSchema[str] = Field(default="", description="完整歌词（定稿后写入，剧本生成只读）")
+    shots: list[MVShot] = Field(description="镜头列表")
+
+
+#: content_mode → 该模式下"可直接朗读的整段口播文案"所在的字段名。**TTS 准入判定即此表**
+#: （``server.services.generation_tasks.execute_tts_task`` 与 ``generate_narration_audio``
+#: 工具都只凭「查得到字段名」放行），故登记一个模式等于给它开了配音的门。
 #:
 #: drama 不登记：它的口播是场景级有序 ``utterances``，按 span 逐条派生而非单字段
-#: （见 ``jianying_draft_service._SPAN_SUBTITLE_MODES``）。未登记的模式即"没有可
-#: 直接朗读的整段文案"，调用方据此拒绝，而不是取空串送去合成。
+#: （见 ``jianying_draft_service._SPAN_SUBTITLE_MODES``）。
+#: mv 不登记：歌词要唱不要念，人声走 svs 歌声合成（``generate_singing``）。登记进来
+#: TTS 两个入口都会照单全收，把歌词念成旁白音频落进 ``audio/``——产物看着有、听着全错。
+#:
+#: 未登记的模式即"没有可直接朗读的整段文案"，调用方据此拒绝，而不是取空串送去合成。
 VOICEOVER_TEXT_FIELDS: dict[str, str] = {
     "narration": "novel_text",
     "ad": "voiceover_text",
 }
 
+#: content_mode → 字幕文案字段名（剪映导出 ``jianying_draft_service`` 用）。
+#:
+#: 定义成 ``VOICEOVER_TEXT_FIELDS`` 的**超集**而非另写一份字面量：能朗读的文案必然也是
+#: 字幕文案，这条关系写死在结构里，narration / ad 就不可能在「配音读 A、字幕读 B」上漂移
+#: ——那正是这张表当初合二为一的理由，漂移的表现是「字幕有词、配音没声」这类半残成片。
+#:
+#: 差集只有 mv：歌词是字幕，但不是可朗读的口播。两个语义共用一张表时，给 mv 补字幕
+#: 就等于顺手给它开了 TTS，这是把「同源」这个前提用过了头。
+SUBTITLE_TEXT_FIELDS: dict[str, str] = {
+    **VOICEOVER_TEXT_FIELDS,
+    "mv": "lyrics_line",
+}
+
+
+def _normalize_content_mode(content_mode: str | None) -> str:
+    return (content_mode or "").strip().lower()
+
 
 def voiceover_text_field(content_mode: str | None) -> str | None:
-    """取该内容模式的口播文案字段名；模式不支持整段朗读时返回 None。"""
-    return VOICEOVER_TEXT_FIELDS.get((content_mode or "").strip().lower())
+    """取该内容模式的口播文案字段名；模式不支持整段朗读时返回 None（TTS 据此拒绝）。"""
+    return VOICEOVER_TEXT_FIELDS.get(_normalize_content_mode(content_mode))
+
+
+def subtitle_text_field(content_mode: str | None) -> str | None:
+    """取该内容模式的字幕文案字段名；模式无单字段字幕源时返回 None。"""
+    return SUBTITLE_TEXT_FIELDS.get(_normalize_content_mode(content_mode))
 
 
 # ============ 参考生视频模式（Reference Video） ============
@@ -1038,6 +1149,10 @@ def build_episode_script_model(content_mode: str, supported_durations: list[int]
             segments=(list[segment], Field(description="片段列表")),
         )
     if kind == "shots":
+        # ad 与 mv 共用 shots 骨架、模型不同（mv 有 start_seconds / section / lyrics_line），
+        # 与 script_structure_validator._select_model 同一分派口径。
+        if content_mode == "mv":
+            return _mv_episode_model(duration_type, "镜头时长（秒），必须取 supported_durations 中的值")
         return _ad_episode_model(duration_type, "镜头时长（秒），必须取 supported_durations 中的值")
     scene = _constrained_duration_item(DramaScene, duration_type, "场景时长（秒），必须取 supported_durations 中的值")
     return create_model(
@@ -1072,6 +1187,17 @@ def _ad_episode_model(duration_type: object, description: str) -> type[BaseModel
     return create_model(
         "AdEpisodeScript",
         __base__=AdEpisodeScript,
+        shots=(list[shot], Field(description="镜头列表")),
+    )
+
+
+def _mv_episode_model(duration_type: object, description: str) -> type[BaseModel]:
+    """MV 剧集脚本的动态包装骨架。``song`` / ``lyrics`` 是 SkipJsonSchema 字段，
+    不进 LLM 输出，由作曲与写词步骤单独写入（见 MVEpisodeScript docstring）。"""
+    shot = _constrained_duration_item(MVShot, duration_type, description)
+    return create_model(
+        "MVEpisodeScript",
+        __base__=MVEpisodeScript,
         shots=(list[shot], Field(description="镜头列表")),
     )
 

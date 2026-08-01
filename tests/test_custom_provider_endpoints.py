@@ -35,6 +35,7 @@ class TestRegistry:
             "kling-image",
             "kling-video",
             "openai-tts",
+            "newapi-music",
         }
 
     def test_each_spec_has_required_fields(self):
@@ -59,6 +60,8 @@ class TestRegistry:
             "request_method": "POST",
             "request_path_template": "/v1/chat/completions",
             "image_capabilities": None,
+            # 非 audio 类不声明音频能力（audio 类必声明，见 _validate_audio_caps_declarations）
+            "audio_capabilities": None,
             # 未声明的 endpoint cap 序列化为 None（resolver fallthrough 到 backend caps）
             "video_max_reference_images": None,
             "end_image_capable": False,
@@ -224,7 +227,8 @@ class TestRegistry:
         image_keys = {s.key for s in ENDPOINT_REGISTRY.values() if s.media_type == "image"}
         video_keys = {s.key for s in ENDPOINT_REGISTRY.values() if s.media_type == "video"}
         audio_keys = {s.key for s in ENDPOINT_REGISTRY.values() if s.media_type == "audio"}
-        assert audio_keys == {"openai-tts"}
+        # 音乐复用 audio 通道（同一批 GPU 的并发额度），不另设 media_type
+        assert audio_keys == {"openai-tts", "newapi-music"}
         assert text_keys == {"openai-chat", "gemini-generate"}
         assert image_keys == {
             "openai-images",

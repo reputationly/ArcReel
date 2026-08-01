@@ -53,8 +53,8 @@ from lib.custom_provider.duration_presets import (
         ("MiniMax-Hailuo-2.3-Fast", [6]),
         # 不带 hailuo 的 minimax id 不再命中固定 6，落回默认（裸 minimax token 已移除）
         ("minimax-abab-6.5", DEFAULT_FALLBACK),
-        # Wan
-        ("wan-2.1", [4, 5]),
+        # Wan：自建部署实测 2-7；猜窄会让参考直出的 unit 时长凑不出合法组合而整条不可用
+        ("wan-2.1", [2, 3, 4, 5, 6, 7]),
         # Pika
         ("pika-2.0", [3, 5, 10]),
         # 未知模型 → fallback

@@ -1188,6 +1188,91 @@ class TestAdReferenceUnitsValidation:
         assert any("不存在" in w for w in result.warnings)
 
 
+class TestMVEpisodeValidation:
+    """MV 剧本与 ad 共用 shots 骨架，但一等字段不同——共用骨架不等于共用字段校验。
+
+    形状相同（平铺数组 + shot_id）让二者走同一个 `shots` 分支，若字段校验不按 content_mode
+    分流，合法的 MV 剧本会被逐镜报「缺少必填字段 voiceover_text」——镜头表越长报得越多，
+    而剧本本身完全正确。
+    """
+
+    def _mv_shot(self, **overrides) -> dict:
+        shot = {
+            "shot_id": "E1S01",
+            "section": "verse",
+            "start_seconds": 8.0,
+            "duration_seconds": 4,
+            "lyrics_line": "夜色漫过天台",
+            "is_performance": True,
+            "characters_in_shot": ["姜月茴"],
+            "scenes": ["古宅"],
+            "props": [],
+            "image_prompt": "img",
+            "video_prompt": "vid",
+        }
+        shot.update(overrides)
+        return shot
+
+    def _validate(self, tmp_path, shots: list[dict]):
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", _project_payload("mv"))
+        _write_json(
+            project_dir / "scripts" / "episode_1.json",
+            {"episode": 1, "title": "夜色", "content_mode": "mv", "shots": shots, "song": {}, "lyrics": ""},
+        )
+        return DataValidator(projects_root=str(tmp_path / "projects")).validate_episode("demo", "episode_1.json")
+
+    def test_valid_mv_script_passes(self, tmp_path):
+        result = self._validate(tmp_path, [self._mv_shot()])
+        assert result.valid, result.errors
+
+    def test_voiceover_text_not_required(self, tmp_path):
+        """MV 镜头的文本字段是 lyrics_line，不是口播文案。"""
+        result = self._validate(tmp_path, [self._mv_shot()])
+        assert not any("voiceover_text" in e for e in result.errors)
+
+    def test_products_not_demanded(self, tmp_path):
+        """产品引用是广告片专有概念，不该在 MV 上刷 warning。"""
+        result = self._validate(tmp_path, [self._mv_shot()])
+        assert not any("products_in_shot" in w for w in result.warnings)
+
+    def test_missing_start_seconds_rejected(self, tmp_path):
+        """入点是硬要求：它既是拼接位置，也是演唱镜口型驱动音频的切分入点。"""
+        shot = self._mv_shot()
+        del shot["start_seconds"]
+        result = self._validate(tmp_path, [shot])
+        assert not result.valid
+        assert any("start_seconds" in e for e in result.errors)
+
+    def test_missing_section_rejected(self, tmp_path):
+        shot = self._mv_shot()
+        del shot["section"]
+        result = self._validate(tmp_path, [shot])
+        assert not result.valid
+        assert any("section" in e for e in result.errors)
+
+    def test_empty_shots_is_a_warning_not_an_error(self, tmp_path):
+        """写歌与排镜头之间必然有一段 shots 为空的中间态，报 error 等于新建项目即无效。"""
+        result = self._validate(tmp_path, [])
+        assert result.valid, result.errors
+        assert any("shots" in w for w in result.warnings)
+
+    def test_ad_empty_shots_still_an_error(self, tmp_path):
+        """放宽只针对 MV：ad 没有这段中间态，空 shots 仍是错误。"""
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", _ad_project_payload())
+        _write_json(
+            project_dir / "scripts" / "episode_1.json",
+            {"episode": 1, "title": "带货", "content_mode": "ad", "shots": []},
+        )
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_episode("demo", "episode_1.json")
+        assert not result.valid
+
+    def test_music_dir_is_a_recognized_project_entry(self):
+        """歌声/伴奏落在 music/，未登记会让每个 MV 项目的归档诊断都报「未识别的附加目录」。"""
+        assert "music" in DataValidator.ALLOWED_ROOT_ENTRIES
+
+
 class TestSourceKindValidation:
     """source_kind 顶层枚举校验：缺省 novel（缺失放行），仅拦非法值；并锁泛指 speaker 回归。"""
 

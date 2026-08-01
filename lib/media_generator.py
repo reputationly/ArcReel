@@ -453,6 +453,15 @@ class MediaGenerator:
 
         if self._audio_backend is None:
             raise RuntimeError("audio_backend not configured")
+        # media_type="audio" 底下装着三种互不兼容的协议：TTS 只有 synthesize、作曲只有
+        # generate_music、歌声只有 synthesize_singing。设置页的选项已按 endpoint 声明的能力
+        # 分列，但项目级覆盖 / 历史配置 / 直接改库都能绕过它——落到这里只剩一个没有 synthesize
+        # 的对象，不拦就是 AttributeError，错误信息里看不出「配错了模型」这回事。
+        if not hasattr(self._audio_backend, "synthesize"):
+            raise ValueError(
+                f"模型 {self._audio_backend.model} 不具备语音合成能力："
+                "请在设置页把旁白配音模型配成 TTS 模型（作曲 / 歌声模型不会念旁白）"
+            )
 
         # audio 合成字符数 → 计费 token 的语义转写已收进 ledger union 分发（_settlement_from_result），
         # 此处仅把 backend 结果对象递交给 call.success。
@@ -496,6 +505,7 @@ class MediaGenerator:
         end_image: Path | None = None,
         reference_images: list[Path] | None = None,
         reference_audio_files: list[Path] | None = None,
+        driving_audio: Path | None = None,
         aspect_ratio: str = "9:16",
         duration_seconds: str | int = "8",
         resolution: str | None = None,
@@ -529,6 +539,7 @@ class MediaGenerator:
                 end_image=end_image,
                 reference_images=reference_images,
                 reference_audio_files=reference_audio_files,
+                driving_audio=driving_audio,
                 aspect_ratio=aspect_ratio,
                 duration_seconds=duration_seconds,
                 resolution=resolution,
@@ -545,6 +556,9 @@ class MediaGenerator:
         end_image: Path | None = None,
         reference_images: list[Path] | None = None,
         reference_audio_files: list[Path] | None = None,
+        #: 驱动音频（口型同步）。与 reference_audio_files 语义不同：那是音色样本，
+        #: 这是要对口型的内容音频。非空即让支持 s2v 的 backend 走数字人路径。
+        driving_audio: Path | None = None,
         aspect_ratio: str = "9:16",
         duration_seconds: str | int = "8",
         resolution: str | None = None,
@@ -705,6 +719,7 @@ class MediaGenerator:
                         start_image=start_arg,
                         end_image=end_arg,
                         reference_images=ref_arg,
+                        driving_audio=driving_audio,
                         # 音频不进压缩器（specs 只收图片），故直接透传原列表：顺序即 prompt
                         # 「音频N」的指认顺序，任何重排都会把 A 角色的音色安到 B 角色头上。
                         reference_audio_files=reference_audio_files,

@@ -28,6 +28,7 @@ from lib.episode_paths import (
     STEP1_FILENAMES,
     STEP1_LEGACY_FILENAMES,
     episode_drafts_dir,
+    has_step1,
 )
 from lib.json_io import atomic_write_json
 from lib.path_safety import PathTraversalError, safe_join
@@ -155,11 +156,12 @@ def get_video_capabilities_tool(ctx: ToolContext):
 
 
 def _resolve_step1_path(project_path: Path, episode: int, project_data: dict[str, Any]) -> tuple[Path, str] | None:
-    """Return (step1_md path, hint text for missing-file error)；ad 一键生成不依赖 step1，返回 None。"""
+    """Return (step1_md path, hint text for missing-file error)；ad / mv 一键生成不依赖 step1，返回 None。"""
     content_mode = project_data.get("content_mode", "narration")
-    if content_mode == "ad":
-        # ad 创作输入是 project.json 的 brief + 产品信息 + target_duration，
-        # ScriptGenerator 的 ad 分支不读 drafts/ 中间文件。
+    if not has_step1(content_mode):
+        # ad 的创作输入是 project.json 的 brief + 产品信息 + target_duration，mv 的是剧本顶层的
+        # song + lyrics；ScriptGenerator 对二者都不读 drafts/ 中间文件。名单收在 episode_paths，
+        # 不在此另列一份——分叉的后果是新模式在这里被要求交一个它永远不会有的 step1 文件。
         return None
     episode_dict = next(
         (ep for ep in (project_data.get("episodes") or []) if ep.get("episode") == episode),

@@ -1484,8 +1484,31 @@ class ProjectManager:
         if not legacy:
             project.pop("video_model_settings", None)
 
-    # 广告/短片项目恒单集：episodes 恒为第 1 集单条，剧本即第 1 集脚本文件
-    AD_SINGLE_EPISODE = {"episode": 1, "title": "", "script_file": episode_script_relpath(1)}
+    # 恒单集的内容模式：episodes 恒为第 1 集单条，剧本即第 1 集脚本文件。
+    # ad（一支短片）与 mv（一支 MV）都是单件成品，不存在分集概念。
+    SINGLE_EPISODE = {"episode": 1, "title": "", "script_file": episode_script_relpath(1)}
+    SINGLE_EPISODE_MODES = frozenset({"ad", "mv"})
+    # 不持有项目级 default_duration 的内容模式：单镜时长不由项目级偏好决定——ad 按
+    # target_duration 预算逐镜头规划，mv 由歌曲段落决定（副歌快切、间奏可长）。
+    NO_DEFAULT_DURATION_MODES = frozenset({"ad", "mv"})
+    # content_mode → 该模式不开放的 generation_mode。宫格单格分辨率与 ad 的产品高保真目标
+    # 冲突；mv 另禁参考直出——口型驱动要拿分镜图作人物首帧，而参考直出没有分镜这一步
+    # （同一约束在 lib/prompt_builders_mv.py 的守卫里对生成侧再拦一道）。
+    #
+    # 收在数据层一处：写入边界（create / PATCH）、动作端点（宫格生成）、前端选择器三处都读它。
+    # 各写一份的后果是前端灰掉了、后端仍放行，用户用 API 或旧页面就能把项目配成不可生成的状态。
+    UNSUPPORTED_GENERATION_MODES: dict[str, frozenset[str]] = {
+        "ad": frozenset({"grid"}),
+        "mv": frozenset({"grid", "reference_video"}),
+    }
+
+    @classmethod
+    def generation_mode_supported(cls, content_mode: str | None, generation_mode: str | None) -> bool:
+        """该内容模式是否开放此生成方式（未登记的模式全放行）。"""
+        if generation_mode is None:
+            return True
+        return generation_mode not in cls.UNSUPPORTED_GENERATION_MODES.get(content_mode or "", frozenset())
+
     # 创建入口未传 target_duration 时的数据层兜底（与创建向导默认档位同值）
     AD_DEFAULT_TARGET_DURATION = 60
 
@@ -1525,9 +1548,15 @@ class ProjectManager:
             raise ValueError(f"source_kind 值无效: {source_kind!r}，必须是 {sorted(VALID_SOURCE_KINDS)}")
 
         # 数据层守卫：模式专属字段互斥。路由层已返回 400，这里再兜一道防非路由调用方。
+        # default_duration 按模式表判定而非只认 ad——路由与前端都已按表拒绝，数据层只认 ad
+        # 的话，非路由调用方（归档导入、脚本、测试夹具）仍能建出带该字段的 MV 项目，
+        # 而这个字段之后既不生效也改不掉（PATCH 对它出现本身就返回 400）。
+        if resolved_mode in self.NO_DEFAULT_DURATION_MODES and default_duration is not None:
+            raise ValueError(
+                f"{resolved_mode} 项目不持有 default_duration"
+                "（ad 的镜头时长按 target_duration 预算逐镜规划，mv 由歌曲段落决定）"
+            )
         if resolved_mode == "ad":
-            if default_duration is not None:
-                raise ValueError("广告/短片项目不持有 default_duration（镜头时长按 target_duration 预算逐镜头规划）")
             if target_duration is not None and (
                 not isinstance(target_duration, int) or isinstance(target_duration, bool) or target_duration <= 0
             ):
@@ -1568,7 +1597,10 @@ class ProjectManager:
                 target_duration if target_duration is not None else self.AD_DEFAULT_TARGET_DURATION
             )
             project["brief"] = brief if brief is not None else ""
-            project["episodes"] = [dict(self.AD_SINGLE_EPISODE)]
+        if resolved_mode in self.SINGLE_EPISODE_MODES:
+            # 单件成品模式建项目即落单集条目。mv 尤其不能省：它的 song / lyrics 存在剧本
+            # 顶层，而剧本要靠 song 才能生成——没有这条 episode 条目，两条路互相堵死。
+            project["episodes"] = [dict(self.SINGLE_EPISODE)]
         if default_duration is not None:
             project["default_duration"] = default_duration
         if style_template_id is not None:
@@ -1584,6 +1616,13 @@ class ProjectManager:
             forbidden = reserved & set(extras)
             if forbidden:
                 raise ValueError(f"extras 不允许覆盖核心字段: {sorted(forbidden)}")
+            # generation_mode 只经 extras 进来（无专属形参），故模式禁用表要在此再把一道关：
+            # 上面的 reserved 只挡「覆盖已构造的核心字段」，挡不住「写入一个本模式不支持的值」。
+            # 路由层已按同一张表返回 400，这里防的是归档导入、脚本、测试夹具等非路由调用方——
+            # 落盘之后再报错，报的是生成期的能力不匹配，指不回「这个模式压根不该选这条路径」。
+            extra_gen_mode = extras.get("generation_mode")
+            if not self.generation_mode_supported(resolved_mode, extra_gen_mode):
+                raise ValueError(f"{resolved_mode} 项目不支持生成方式 {extra_gen_mode!r}")
             project.update(extras)
 
         self.save_project(project_name, project)

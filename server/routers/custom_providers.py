@@ -87,7 +87,10 @@ router = APIRouter(prefix="/custom-providers", tags=["Custom Providers"])
 
 _CONNECTION_TEST_TIMEOUT = 15  # 秒
 
-# 全局 DB settings 中可能引用自定义供应商的键（删除 provider / 删除 model 时清理悬空引用）
+# 全局 DB settings 中可能引用自定义供应商的键（删除 provider / 删除 model 时清理悬空引用）。
+# 判据是「该设置项的值是不是 provider/model 形态」——凡登记在 ``_validators._FIELD_MEDIA_TYPES``
+# 里的全局键都必须在此出现（有穷举测试锁住）。漏一个的表现是：用户删掉自定义供应商后，
+# 该设置仍留着 custom-N/model 悬空引用，下次生成时报「供应商不存在」而不是回落到未配置。
 _BACKEND_SETTING_KEYS = (
     "default_video_backend",
     "default_image_backend",
@@ -95,6 +98,9 @@ _BACKEND_SETTING_KEYS = (
     "default_image_backend_i2i",
     "default_text_backend",
     "default_audio_backend",
+    "default_music_backend",
+    "default_singing_backend",
+    "default_lip_sync_backend",
     "text_backend_simple",
     "text_backend_complex",
 )
@@ -104,6 +110,11 @@ _BACKEND_SETTING_KEYS = (
 _PROJECT_BACKEND_KEYS = (
     "video_backend",
     "audio_backend",
+    # 音乐 / 歌声 / 口型驱动的项目级覆盖（见 lib/config/resolver.py 的 _MusicTaskKeys.project_field
+    # 与 resolve_lip_sync_backend）。全局键清理了、项目键没清，悬空引用照样能让单个项目生成失败。
+    "music_backend",
+    "singing_backend",
+    "lip_sync_backend",
     "image_provider_t2i",
     "image_provider_i2i",
     "text_backend_simple",

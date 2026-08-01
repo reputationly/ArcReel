@@ -2,7 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
 import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
-import type { NarrationSegment, AdShot } from "@/types";
+import type { NarrationSegment, AdShot, MVShot } from "@/types";
 import { API } from "@/api";
 import { useProjectsStore } from "@/stores/projects-store";
 import { StatusBadge, statusFromAssets } from "@/components/canvas/timeline/StatusBadge";
@@ -45,6 +45,12 @@ function getSegmentText(seg: Segment, mode: ListContentMode): string {
     // ad 模式：口播文案是一等内容，列表预览优先展示；无口播的纯画面镜头退回画面描述
     const voiceover = (seg as AdShot).voiceover_text;
     if (typeof voiceover === "string" && voiceover.trim()) return voiceover;
+    return getImagePromptScene(seg);
+  }
+  if (mode === "mv") {
+    // mv 模式：该镜对应的歌词行是一等内容（与 ad 的口播同位），纯器乐段退回画面描述
+    const lyricsLine = (seg as MVShot).lyrics_line;
+    if (typeof lyricsLine === "string" && lyricsLine.trim()) return lyricsLine;
     return getImagePromptScene(seg);
   }
   // drama 模式：用 image_prompt.scene 作为画面预览，与 narration 的 novel_text 对称
@@ -330,7 +336,7 @@ export function ShotList({
                     <span className="num text-[10px]" style={{ color: "var(--color-text-4)" }}>
                       {t("duration_seconds_value_text", { value: seg.duration_seconds ?? 0 })}
                     </span>
-                    {contentMode === "ad" && (seg as AdShot).section && (
+                    {(contentMode === "ad" || contentMode === "mv") && (seg as AdShot | MVShot).section && (
                       <span
                         className="rounded px-1 py-px text-[9px] font-semibold uppercase"
                         style={{

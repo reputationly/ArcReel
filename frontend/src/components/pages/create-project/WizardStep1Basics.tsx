@@ -5,10 +5,11 @@ import { GenerationModeSelector } from "@/components/shared/GenerationModeSelect
 import { ACCENT_BTN_CLS, ACCENT_BUTTON_STYLE, radioCardClass } from "@/components/ui/darkroom-tokens";
 import { FieldLabel } from "@/components/ui/FieldLabel";
 import type { GenerationMode } from "@/utils/generation-mode";
+import { contentModeDescKey, disabledGenerationModes } from "@/utils/content-mode";
 
 export interface WizardStep1Value {
   title: string;
-  contentMode: "narration" | "drama" | "ad";
+  contentMode: "narration" | "drama" | "ad" | "mv";
   /** 源文件性质：novel（默认）/ screenplay。仅 drama 暴露，创建即定、不可变。 */
   sourceKind: "novel" | "screenplay";
   aspectRatio: "9:16" | "16:9";
@@ -130,13 +131,28 @@ export function WizardStep1Basics({
             />
             {t("dashboard:ad_short_video")}
           </label>
+          <label className={radioCardClass(value.contentMode === "mv")}>
+            <input
+              type="radio"
+              name="contentMode"
+              value="mv"
+              checked={value.contentMode === "mv"}
+              onChange={() =>
+                onChange({
+                  ...value,
+                  contentMode: "mv",
+                  // MV 只走图生视频：演唱镜头要用分镜图作人物首帧再驱动口型，
+                  // 参考直出没有这一步；宫格的单格分辨率也撑不起人物特写。
+                  generationMode: "storyboard",
+                })
+              }
+              className="sr-only"
+            />
+            {t("dashboard:mv_mode")}
+          </label>
         </div>
         <p className="mt-2 text-[11.5px] leading-[1.55] text-text-3">
-          {value.contentMode === "narration"
-            ? t("dashboard:content_mode_narration_desc")
-            : value.contentMode === "drama"
-              ? t("dashboard:content_mode_drama_desc")
-              : t("dashboard:content_mode_ad_desc")}
+          {t(`dashboard:${contentModeDescKey(value.contentMode)}`)}
         </p>
       </div>
 
@@ -270,7 +286,9 @@ export function WizardStep1Basics({
         <GenerationModeSelector
           value={value.generationMode}
           onChange={(next) => onChange({ ...value, generationMode: next })}
-          disabledModes={value.contentMode === "ad" ? ["grid"] : undefined}
+          disabledModes={
+            disabledGenerationModes(value.contentMode)
+          }
         />
       </div>
 

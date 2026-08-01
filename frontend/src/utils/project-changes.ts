@@ -9,6 +9,8 @@ export const GENERATION_ACTIONS: ReadonlySet<ProjectChange["action"]> = new Set(
   "grid_ready",
   "reference_video_ready",
   "tts_ready",
+  "music_ready",
+  "singing_ready",
 ]);
 
 // 完成事件（action 本身即通知类别，与 entity_type 无关）——优先级查表、导航行为、通知文案均不按
@@ -28,6 +30,8 @@ const ENTITY_LABELS: Record<ProjectChange["entity_type"], string> = {
   overview: "项目概览",
   draft: "预处理",
   grid: "宫格",
+  music: "曲子",
+  singing: "人声轨",
   // 任务终态是刷新信号（important=false），不进通知文案；此项只为满足映射完整性。
   task: "任务",
 };
