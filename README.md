@@ -283,6 +283,7 @@ flowchart TB
 ## 文档
 
 - 📖 [完整入门教程](docs/getting-started.md) — 从零开始的手把手指南
+- 🔄 [升级与回滚](docs/upgrade.md) — Docker 部署换镜像、备份数据与失败退回
 - 📦 [剪映草稿导出指南](docs/jianying-export-guide.md) — 将视频片段导入剪映桌面版进行二次编辑
 - 💰 [Google GenAI 费用说明](docs/google-genai-docs/pricing.md) — Gemini 图像 / Veo 视频生成官方定价页抓取（英文）
 - 💰 [火山方舟费用说明](docs/ark-docs/火山方舟费用参考.md) — 火山方舟视频 / 图片 / 文本模型费用参考

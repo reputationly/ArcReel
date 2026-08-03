@@ -1,6 +1,6 @@
 # 部署补充说明
 
-本文档补充 [`getting-started.md`](getting-started.md) 未覆盖的部署细节，主要面向已经能够通过 Docker / 本地启动 ArcReel 的运维与开发者。
+本文档补充 [`getting-started.md`](getting-started.md) 未覆盖的部署细节，主要面向已经能够通过 Docker / 本地启动 ArcReel 的运维与开发者。已部署后的换镜像、备份与回滚见 [`upgrade.md`](upgrade.md)。
 
 ## Agent 沙箱依赖
 
