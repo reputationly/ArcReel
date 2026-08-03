@@ -384,31 +384,325 @@ class TestMusicPayload:
         assert _resolve_task_type(MusicGenerationRequest(prompt="p", output_path=tmp_path / "m.wav")) == "t2m"
 
 
+class TestStaleAudioSiblings:
+    """同一 resource_id 只应留下一个文件——换了产出格式不同的模型时，新产物写在旧文件**旁边**。
+
+    读取侧（导出、口型驱动、指纹）按固定优先级 ``(.wav, .mp3)`` 遍历候选，旧的 ``.wav`` 一直
+    赢过新的 ``.mp3``：任务报告了新路径，成片却用着上一个模型留下的音轨，两边说法不一。
+    清理放在写侧而非读侧——读侧加「按新鲜度选」只是让两个文件继续并存然后猜。
+    """
+
+    @pytest.mark.unit
+    def test_regenerating_with_new_format_removes_the_old_file(self, tmp_path: Path):
+        from lib.audio_backends.newapi_music import _drop_stale_siblings
+
+        stale = tmp_path / "main.wav"
+        stale.write_bytes(b"old-wav")
+        fresh = tmp_path / "main.mp3"
+        fresh.write_bytes(b"new-mp3")
+
+        _drop_stale_siblings(fresh)
+
+        assert not stale.exists()
+        assert fresh.read_bytes() == b"new-mp3"
+
+    @pytest.mark.unit
+    def test_reader_priority_would_pick_the_stale_file_without_cleanup(self, tmp_path: Path):
+        """反向确认这条清理确实有用：不清理时读取侧选中的就是旧文件。"""
+        from lib.resource_paths import resource_candidate_paths
+
+        (tmp_path / "music").mkdir()
+        (tmp_path / "music/main.wav").write_bytes(b"old")
+        (tmp_path / "music/main.mp3").write_bytes(b"new")
+
+        first_hit = next(rel for rel in resource_candidate_paths("music", "main") if (tmp_path / rel).exists())
+        assert first_hit == "music/main.wav"  # 固定优先级下旧格式在前
+
+    @pytest.mark.unit
+    def test_keeps_the_file_just_written(self, tmp_path: Path):
+        """当前产物本身不能被误删——扩展名恰好等于默认值时清理逻辑会遍历到它自己。"""
+        from lib.audio_backends.newapi_music import _drop_stale_siblings
+
+        kept = tmp_path / "vocal_main.wav"
+        kept.write_bytes(b"fresh")
+        _drop_stale_siblings(kept)
+        assert kept.read_bytes() == b"fresh"
+
+    @pytest.mark.unit
+    def test_cleanup_failure_does_not_fail_the_task(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """产物已经落好，为删不掉旧文件而让整个生成任务失败不划算——告警即可。"""
+        from lib.audio_backends.newapi_music import _drop_stale_siblings
+
+        (tmp_path / "main.wav").write_bytes(b"old")
+        fresh = tmp_path / "main.mp3"
+        fresh.write_bytes(b"new")
+        monkeypatch.setattr(Path, "unlink", lambda self, **kw: (_ for _ in ()).throw(OSError("locked")))
+
+        _drop_stale_siblings(fresh)  # 不抛
+
+    @pytest.mark.unit
+    def test_both_download_paths_clean_up(self):
+        """守连接点：作曲与歌声两条下载路径都要清理，只改一条会让另一条继续留下双份。"""
+        import inspect
+
+        from lib.audio_backends.newapi_music import NewAPIMusicBackend
+
+        for method in (NewAPIMusicBackend.generate_music, NewAPIMusicBackend.synthesize_singing):
+            assert "_drop_stale_siblings(" in inspect.getsource(method), method.__name__
+
+
+class TestStaleVocalAgainstMusic:
+    """人声轨派生自作曲产物，作曲重跑过它就作废。
+
+    现实顺序：作曲 → 歌声合成 → 觉得曲子不行 → 重新作曲 → 直接导出。用户忘了重跑歌声合成，
+    而两处读取侧都无条件「人声轨优先」，于是成片配的是上一版曲子的人声、演唱镜口型对的是旧
+    旋律——ArcReel 内部完全看不出来（分镜、视频、字幕都对）。
+
+    两处的决策**故意不同**：导出退回作曲产物（可撤销，且用户一听嗓子不对就会回去补跑），
+    口型驱动直接拦住（口型会烧进视频文件，纠正要再花一次视频生成的钱）。
+    """
+
+    @staticmethod
+    def _write_pair(root: Path, *, vocal_first: bool) -> None:
+        import os
+
+        (root / "music").mkdir(parents=True, exist_ok=True)
+        music, vocal = root / "music/main.wav", root / "music/vocal_main.wav"
+        music.write_bytes(b"m")
+        vocal.write_bytes(b"v")
+        older, newer = (vocal, music) if vocal_first else (music, vocal)
+        os.utime(older, (1_700_000_000, 1_700_000_000))
+        os.utime(newer, (1_700_000_100, 1_700_000_100))
+
+    @pytest.mark.unit
+    def test_predicate_compares_generation_time(self, tmp_path: Path):
+        import os
+
+        from lib.resource_paths import is_outdated_by
+
+        src, derived = tmp_path / "main.wav", tmp_path / "vocal_main.wav"
+        src.write_bytes(b"m")
+        derived.write_bytes(b"v")
+
+        os.utime(derived, (1_700_000_000, 1_700_000_000))
+        os.utime(src, (1_700_000_100, 1_700_000_100))
+        assert is_outdated_by(derived, src) is True
+
+        os.utime(derived, (1_700_000_200, 1_700_000_200))
+        assert is_outdated_by(derived, src) is False
+
+    @pytest.mark.unit
+    def test_equal_mtime_is_not_stale(self, tmp_path: Path):
+        """同一次流水线里先后落盘的两个文件可能落在同一秒，不能判过期。"""
+        import os
+
+        from lib.resource_paths import is_outdated_by
+
+        src, derived = tmp_path / "main.wav", tmp_path / "vocal_main.wav"
+        src.write_bytes(b"m")
+        derived.write_bytes(b"v")
+        os.utime(src, (1_700_000_000, 1_700_000_000))
+        os.utime(derived, (1_700_000_000, 1_700_000_000))
+
+        assert is_outdated_by(derived, src) is False
+
+    @pytest.mark.unit
+    def test_missing_file_does_not_block(self, tmp_path: Path):
+        """判定本身失败（文件被挪走）不该让导出或生成停摆。"""
+        from lib.resource_paths import is_outdated_by
+
+        derived = tmp_path / "vocal_main.wav"
+        derived.write_bytes(b"v")
+        assert is_outdated_by(derived, tmp_path / "gone.wav") is False
+
+    @pytest.mark.unit
+    def test_export_falls_back_to_composition(self, tmp_path: Path):
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        self._write_pair(tmp_path, vocal_first=True)
+        resolved = _resolve_music_track(tmp_path)
+        assert resolved is not None and resolved.name == "main.wav"
+
+    @pytest.mark.unit
+    def test_export_still_prefers_a_current_vocal(self, tmp_path: Path):
+        """反向：人声轨是新的时仍然优先它——退回逻辑不能把正常情况一起改坏。"""
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        self._write_pair(tmp_path, vocal_first=False)
+        resolved = _resolve_music_track(tmp_path)
+        assert resolved is not None and resolved.name == "vocal_main.wav"
+
+    @pytest.mark.unit
+    def test_lip_sync_refuses_stale_vocal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import server.services.generation_tasks as gt
+
+        self._write_pair(tmp_path, vocal_first=True)
+        monkeypatch.setattr(gt, "item_is_lip_sync", lambda _project, _item: True)
+
+        with pytest.raises(ValueError, match="比作曲产物"):
+            gt._resolve_lip_sync_source({}, tmp_path, object())
+
+    @pytest.mark.unit
+    def test_lip_sync_accepts_a_current_vocal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        import server.services.generation_tasks as gt
+
+        self._write_pair(tmp_path, vocal_first=False)
+        monkeypatch.setattr(gt, "item_is_lip_sync", lambda _project, _item: True)
+
+        resolved = gt._resolve_lip_sync_source({}, tmp_path, object())
+        assert resolved is not None and resolved.name == "vocal_main.wav"
+
+    @pytest.mark.unit
+    def test_both_readers_check_staleness(self):
+        """守连接点：两处「人声轨优先」的读取侧都要判过期，只改一处另一处继续用旧轨。"""
+        import inspect
+
+        from server.services.generation_tasks import _resolve_lip_sync_source
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        for fn in (_resolve_lip_sync_source, _resolve_music_track):
+            assert "is_outdated_by(" in inspect.getsource(fn), fn.__name__
+
+
+class TestAudioMimeSingleSource:
+    """音频 MIME 只能有一张表。
+
+    曾经作曲侧按扩展名取 MIME、口型侧另写一份硬编码 ``data:audio/wav``——同一条规则两份实现，
+    改了一处另一处继续贴错标签。现在两侧都走 ``lib.resource_paths.audio_data_uri``。
+    """
+
+    @pytest.mark.unit
+    def test_lip_sync_labels_mp3_correctly(self, tmp_path: Path):
+        from lib.video_backends.newapi import NewAPIVideoBackend
+
+        backend = NewAPIVideoBackend(api_key="k", base_url="https://x", model="infinitetalk-480p")
+        mp3 = tmp_path / "driving.mp3"
+        mp3.write_bytes(b"ID3")
+        metadata: dict = {}
+
+        backend._apply_lip_sync(metadata, mp3)
+
+        assert metadata["audio"].startswith("data:audio/mpeg;base64,")
+
+    @pytest.mark.unit
+    def test_no_hardcoded_audio_mime_remains(self):
+        """守连接点：任何模块里再写死 ``data:audio/`` 字面量都会重新引入漂移。"""
+        import lib.audio_backends.newapi_music as music_mod
+        import lib.video_backends.newapi as video_mod
+
+        for mod in (music_mod, video_mod):
+            assert "data:audio/" not in Path(mod.__file__).read_text(encoding="utf-8"), mod.__name__
+
+    @pytest.mark.unit
+    def test_mime_keys_match_audio_extensions(self):
+        """两张表的键集必须一致：候选路径认的格式、编码器就得认。"""
+        from lib.resource_paths import AUDIO_EXTENSIONS, AUDIO_MIME_BY_SUFFIX
+
+        assert set(AUDIO_MIME_BY_SUFFIX) == set(AUDIO_EXTENSIONS)
+
+
+class TestAudioExtensionFidelity:
+    """落盘扩展名必须跟随实际产物——同一 backend 下不同模型格式不同。
+
+    实测：ACE-Step 作曲产物是 .mp3，SoulX-Singer 歌声合成产物是 .wav。写死一种的后果有两处：
+    后续按后缀推导 MIME 会给门面贴错标签（错误发生在引擎侧、指不回标签这一层），以及
+    播放器/剪辑器按后缀选解码器。
+    """
+
+    @pytest.mark.unit
+    def test_extension_follows_result_url(self, tmp_path: Path):
+        from lib.audio_backends.newapi_music import _output_with_real_ext
+
+        base = tmp_path / "main.wav"
+        mp3_url = "https://obs.example.com/t2m-ace-step/2026/08/03/1/abc.mp3?AccessKeyId=x&Expires=1"
+        assert _output_with_real_ext(base, mp3_url).name == "main.mp3"
+
+        wav_url = "https://obs.example.com/svs-soulx-singer/2026/08/03/1/def.wav?Signature=y"
+        assert _output_with_real_ext(base, wav_url).name == "main.wav"
+
+    @pytest.mark.unit
+    def test_unknown_extension_keeps_caller_default(self, tmp_path: Path):
+        """URL 认不出扩展名时保留调用方给的默认值，不臆造一个。"""
+        from lib.audio_backends.newapi_music import _output_with_real_ext
+
+        base = tmp_path / "main.wav"
+        assert _output_with_real_ext(base, "https://obs.example.com/no-ext-here").name == "main.wav"
+
+    @pytest.mark.unit
+    def test_readers_search_all_candidate_extensions(self):
+        """写侧按实际格式落盘，读侧就必须按候选找——否则「文件明明生成了却读不到」。"""
+        from lib.resource_paths import resource_candidate_paths
+
+        assert resource_candidate_paths("music", "main") == ("music/main.wav", "music/main.mp3")
+        assert resource_candidate_paths("singing", "main") == ("music/vocal_main.wav", "music/vocal_main.mp3")
+        # 非音频类只有一种形状，调用方无需分支
+        assert resource_candidate_paths("videos", "E1S01") == ("videos/scene_E1S01.mp4",)
+
+    @pytest.mark.unit
+    def test_all_audio_readers_use_candidates(self):
+        """守连接点：三处读取侧都要按候选找，认死默认扩展名就会漏掉另一格式。"""
+        import inspect
+
+        from server.services.generation_tasks import _resolve_lip_sync_source, compute_affected_fingerprints
+        from server.services.jianying_draft_service import _first_existing_audio
+
+        for fn in (_resolve_lip_sync_source, compute_affected_fingerprints, _first_existing_audio):
+            assert "resource_candidate_paths(" in inspect.getsource(fn), fn.__name__
+
+    @pytest.mark.unit
+    def test_both_backend_paths_apply_the_real_extension(self):
+        """守连接点：作曲与歌声**两条**下载路径都要按真实扩展名落盘。
+
+        只改一条的表现是「作曲对了、歌声还错着」——而两者格式恰好不同（.mp3 / .wav），
+        漏掉的那条会一直把内容与后缀不符的文件写进项目。
+        """
+        import inspect
+
+        from lib.audio_backends.newapi_music import NewAPIMusicBackend
+
+        for method in (NewAPIMusicBackend.generate_music, NewAPIMusicBackend.synthesize_singing):
+            src = inspect.getsource(method)
+            assert "_output_with_real_ext(request.output_path, url)" in src, method.__name__
+            # 不得再拿请求时假定的路径去下载
+            assert "self._download_with_retry(url, request.output_path)" not in src, method.__name__
+
+    @pytest.mark.unit
+    def test_executors_report_the_real_landed_path(self):
+        """执行器要报 backend 实际落盘的路径，不是请求时假定的那个。"""
+        import inspect
+
+        from server.services.generation_tasks import execute_music_task, execute_singing_task
+
+        for fn in (execute_music_task, execute_singing_task):
+            src = inspect.getsource(fn)
+            assert "result.output_path.relative_to(project_path)" in src, fn.__name__
+
+
 class TestAudioEncoding:
     """data-uri 的 MIME 必须如实反映字节内容——标签贴错的失败发生在引擎侧，指不回真因。"""
 
     @pytest.mark.unit
     def test_mime_follows_suffix(self, tmp_path: Path):
-        from lib.audio_backends.newapi_music import _encode_audio
+        from lib.audio_backends.newapi_music import _encode_reference_audio
 
         wav = tmp_path / "voice.wav"
         wav.write_bytes(b"RIFFfake")
-        assert _encode_audio(wav).startswith("data:audio/wav;base64,")
+        assert _encode_reference_audio(wav).startswith("data:audio/wav;base64,")
 
         # 上传路由同时接受 .mp3（character_audio_ref），编码侧必须原样认它
         mp3 = tmp_path / "voice.MP3"  # 大小写不敏感
         mp3.write_bytes(b"ID3fake")
-        assert _encode_audio(mp3).startswith("data:audio/mpeg;base64,")
+        assert _encode_reference_audio(mp3).startswith("data:audio/mpeg;base64,")
 
     @pytest.mark.unit
     def test_unknown_suffix_fails_loud(self, tmp_path: Path):
         """贴一个猜的标签比报错更难排查——未知格式在编码阶段就拦。"""
-        from lib.audio_backends.newapi_music import _encode_audio
+        from lib.audio_backends.newapi_music import _encode_reference_audio
 
         m4a = tmp_path / "voice.m4a"
         m4a.write_bytes(b"fake")
         with pytest.raises(ValueError, match="m4a"):
-            _encode_audio(m4a)
+            _encode_reference_audio(m4a)
 
     @pytest.mark.unit
     def test_mime_map_covers_the_upload_whitelist(self):
@@ -416,11 +710,11 @@ class TestAudioEncoding:
 
         白名单加了新格式而编码表没跟上的话，用户能传上去、一用就报「不支持」。
         """
-        from lib.audio_backends.newapi_music import _AUDIO_MIME_BY_SUFFIX
+        from lib.resource_paths import AUDIO_MIME_BY_SUFFIX
         from server.routers.files import ALLOWED_EXTENSIONS
 
         upload_exts = set(ALLOWED_EXTENSIONS["character_audio_ref"])
-        assert upload_exts <= set(_AUDIO_MIME_BY_SUFFIX), upload_exts - set(_AUDIO_MIME_BY_SUFFIX)
+        assert upload_exts <= set(AUDIO_MIME_BY_SUFFIX), upload_exts - set(AUDIO_MIME_BY_SUFFIX)
 
 
 class TestSingingSynthesis:

@@ -15,7 +15,6 @@ video 是历史，行为与媒体类型无关。
 
 from __future__ import annotations
 
-import base64
 import logging
 from pathlib import Path
 
@@ -29,6 +28,7 @@ from lib.audio_backends.base import (
     SingingSynthesisResult,
 )
 from lib.logging_utils import format_kwargs_for_log
+from lib.resource_paths import AUDIO_EXTENSIONS, audio_data_uri
 from lib.retry import (
     DEFAULT_BACKOFF_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
@@ -126,15 +126,17 @@ class NewAPIMusicBackend:
         if not url:
             raise RuntimeError(f"NewAPI 音乐生成返回体缺少产物 URL: {state}")
 
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._download_with_retry(url, request.output_path)
+        output_path = _output_with_real_ext(request.output_path, url)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await self._download_with_retry(url, output_path)
+        _drop_stale_siblings(output_path)
 
         metadata = state.get("metadata") or {}
         duration = metadata.get("duration")
         return MusicGenerationResult(
             provider=self.name,
             model=self._model,
-            output_path=request.output_path,
+            output_path=output_path,
             duration_seconds=float(duration) if isinstance(duration, (int, float)) else None,
         )
 
@@ -149,8 +151,8 @@ class NewAPIMusicBackend:
             "prompt": _SVS_PROMPT_PLACEHOLDER,
             "metadata": {
                 "task_type": _TASK_TYPE_SVS,
-                "prompt_audio": _encode_audio(request.voice_reference),
-                "target_audio": _encode_audio(request.target_song),
+                "prompt_audio": _encode_reference_audio(request.voice_reference),
+                "target_audio": _encode_reference_audio(request.target_song),
             },
         }
         logger.info("调用 %s 歌声合成 payload=%s", self.name, format_kwargs_for_log(payload))
@@ -175,15 +177,17 @@ class NewAPIMusicBackend:
         if not url:
             raise RuntimeError(f"NewAPI 歌声合成返回体缺少产物 URL: {state}")
 
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._download_with_retry(url, request.output_path)
+        output_path = _output_with_real_ext(request.output_path, url)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        await self._download_with_retry(url, output_path)
+        _drop_stale_siblings(output_path)
 
         metadata = state.get("metadata") or {}
         duration = metadata.get("duration")
         return SingingSynthesisResult(
             provider=self.name,
             model=self._model,
-            output_path=request.output_path,
+            output_path=output_path,
             duration_seconds=float(duration) if isinstance(duration, (int, float)) else None,
         )
 
@@ -225,7 +229,7 @@ class NewAPIMusicBackend:
             # 输入统一走 input_refs 物化：裸键 reference_audio / src_audio 混进请求体
             # 会被门面当作「原始输入字段」整单 400，故编码成 data-uri 挂在 metadata 下
             # 由门面接管（与视频侧图片入参同一机制）。
-            metadata["reference_audio"] = _encode_audio(request.reference_audio)
+            metadata["reference_audio"] = _encode_reference_audio(request.reference_audio)
         payload["metadata"] = metadata
         return payload
 
@@ -274,6 +278,41 @@ class NewAPIMusicBackend:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
 
+def _output_with_real_ext(output_path: Path, url: str) -> Path:
+    """按产物 URL 的真实扩展名调整落盘路径。
+
+    同一个 backend 下不同模型的产物格式不同：ACE-Step 作曲出 ``.mp3``、SoulX-Singer 歌声
+    合成出 ``.wav``。调用方按资源类型给的是默认扩展名，这里以实际产物为准改写——内容与
+    后缀不符会在两处出问题：后续按后缀推导 MIME 给门面贴错标签，以及播放器/剪辑器按后缀
+    选解码器。URL 无法识别扩展名时保留调用方给的默认值。
+    """
+    stem = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    ext = Path(stem).suffix.lower()
+    return output_path.with_suffix(ext) if ext in AUDIO_EXTENSIONS else output_path
+
+
+def _drop_stale_siblings(kept: Path) -> None:
+    """删掉同名不同后缀的旧产物（``music/main.wav`` vs ``music/main.mp3``）。
+
+    音乐 / 歌声是**项目级单件产物**（一支片子一首曲、一条主唱轨），重复生成即覆盖。但换了
+    产出格式不同的模型后，新文件是写在旧文件**旁边**而非覆盖它——而读取侧按固定优先级遍历
+    候选扩展名（``resource_candidate_paths``），于是导出与口型驱动会一直选中那个陈旧的、
+    上一个模型留下的音轨，任务却报告了新路径，两边说法不一。
+
+    在**下载成功之后**才清理：先删后下的话，下载失败会让用户既没有新的也没有旧的。
+    删除失败只告警不抛——产物已经落好，为清理旧文件失败而让整个任务失败不划算。
+    """
+    for ext in AUDIO_EXTENSIONS:
+        stale = kept.with_suffix(ext)
+        if stale == kept or not stale.exists():
+            continue
+        try:
+            stale.unlink()
+            logger.info("清理同名旧格式音频: %s（当前产物 %s）", stale.name, kept.name)
+        except OSError:
+            logger.warning("清理同名旧格式音频失败，读取侧可能选中陈旧文件: %s", stale, exc_info=True)
+
+
 def _resolve_task_type(request: MusicGenerationRequest) -> str:
     """带参考音频即翻唱（cover），否则纯文本作曲（t2m）。
 
@@ -283,28 +322,9 @@ def _resolve_task_type(request: MusicGenerationRequest) -> str:
     return _TASK_TYPE_COVER if request.reference_audio is not None else _TASK_TYPE_T2M
 
 
-#: 扩展名 → data-uri MIME。键集与上传路由 ``character_audio_ref`` 接受的扩展名对齐
-#: （.wav / .mp3）——那是音色参考的唯一合法入口，这里就该原样认它放进来的东西。
-_AUDIO_MIME_BY_SUFFIX = {
-    ".wav": "audio/wav",
-    ".mp3": "audio/mpeg",
-}
-
-
-def _encode_audio(path: Path) -> str:
-    """音频编码成 data-uri。文件不存在直接抛——静默跳过会让翻唱退化成随机作曲。
-
-    MIME 按扩展名取，不写死 WAV：上传路由同时接受 .mp3，MP3 字节顶着 audio/wav 标签送进
-    门面，物化/解码侧按标签处理就会失败或错解——错误发生在引擎侧，指不回「标签贴错了」。
-    未知扩展名同理 fail-loud：贴一个猜的标签比报错更难排查。
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"参考音频不存在: {path}")
-    mime = _AUDIO_MIME_BY_SUFFIX.get(path.suffix.lower())
-    if mime is None:
-        raise ValueError(f"不支持的参考音频格式: {path.name}（支持 {sorted(_AUDIO_MIME_BY_SUFFIX)}）")
-    payload = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:{mime};base64,{payload}"
+def _encode_reference_audio(path: Path) -> str:
+    """音色参考音频编码成 data-uri。合法扩展名与上传路由 ``character_audio_ref`` 对齐。"""
+    return audio_data_uri(path, label="参考音频")
 
 
 def _extract_failure(state: dict) -> str | None:

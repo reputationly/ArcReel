@@ -842,9 +842,15 @@ class TestNewAPIImageModes:
         """自建引擎的能力按门面 task_type 契约展开，而非一律保守判 0。"""
         from lib.video_backends.newapi import NewAPIVideoBackend
 
-        # wan2.2-i2v 走 flf2v，支持尾帧；不支持纯参考图（r2v 是 bernini 的）
+        # 首尾帧是独立部署的模型（wan2.2-flf2v），不是 i2v 的一种任务类型：门面按模型名推断
+        # task_type，给 i2v 下发 flf2v 只会把两张图物化后发给一个不认这个任务的引擎。
+        flf2v = NewAPIVideoBackend.video_capabilities_for_model("wan2.2-flf2v")
+        assert flf2v.last_frame is True
+        assert flf2v.max_reference_images == 0
+
+        # i2v 只吃首帧，不声明尾帧能力——声明了会让界面开放一个用不了的入口
         i2v = NewAPIVideoBackend.video_capabilities_for_model("wan2.2-i2v")
-        assert i2v.last_frame is True
+        assert i2v.last_frame is False
         assert i2v.max_reference_images == 0
 
         # bernini 走 r2v，支持纯参考图；它没有首尾帧语义
@@ -858,8 +864,8 @@ class TestNewAPIImageModes:
         assert third_party.max_reference_images == 0
 
     def test_gpustack_flf2v_declares_task_type(self, tmp_path: Path):
-        """首尾帧必须显式声明 flf2v：模型名只推断得出 i2v，那条分支不读 images[1]。"""
-        backend = self._backend("wan2.2-i2v")
+        """首尾帧模型显式声明 flf2v：显式 task_type 优先于门面按模型名的推断，语义不靠猜。"""
+        backend = self._backend("wan2.2-flf2v")
         payload: dict = {}
         metadata: dict = {}
         backend._apply_gpustack_images(payload, metadata, ["a", "b"], None)

@@ -44,7 +44,7 @@ _SPAN_SUBTITLE_MODES: frozenset[str] = frozenset({"drama"})
 from lib.path_safety import PathTraversalError, safe_join, safe_resolve
 from lib.project_manager import ProjectManager, effective_mode
 from lib.reference_video.ad_units import ad_shots_by_id
-from lib.resource_paths import resource_relative_path
+from lib.resource_paths import is_outdated_by, resource_candidate_paths
 from lib.script_models import SUBTITLE_TEXT_FIELDS, ad_shot_duration_seconds, get_generated_assets
 from lib.script_skeleton import SKELETONS, resolve_declared_kind
 from lib.speech_rate import estimate_spoken_seconds
@@ -58,8 +58,56 @@ _SUBTITLE_TEXT_FIELDS = SUBTITLE_TEXT_FIELDS
 
 #: 项目级单曲的固定 resource_id，与 sdk_tools/enqueue_music.py 同源。
 _MAIN_MUSIC_TRACK_ID = "main"
+#: 主唱人声轨的固定 resource_id，与 sdk_tools/enqueue_singing.py 同源。
+_MAIN_VOCAL_TRACK_ID = "main"
 
 logger = logging.getLogger(__name__)
+
+
+def _first_existing_audio(project_dir: Path, resource_type: str, resource_id: str) -> Path | None:
+    """按候选扩展名找音频产物。
+
+    产物格式随模型而变（ACE-Step 出 .mp3、SoulX-Singer 出 .wav），认死一种会漏掉另一格式的
+    文件——表现为「曲子明明生成了，导出的草稿却没有音乐轨」。
+    """
+    for rel in resource_candidate_paths(resource_type, resource_id):
+        found = safe_resolve(project_dir, rel)
+        if found is not None:
+            return found
+    return None
+
+
+def _resolve_music_track(project_dir: Path) -> Path | None:
+    """成片音轨：做过歌声合成就用人声轨，否则用作曲产物。
+
+    二者是**替代关系而非叠加**：``generate_singing`` 的输入 ``target_audio`` 就是作曲产物
+    ``music/main.wav``，产出是「换了指定歌手音色重唱的同一首完整歌曲」。同时挂两条会变成
+    两个人在唱同一首。
+
+    人声轨优先的理由是它更贴近用户意图：用户专门确认过歌手的音色参考、专门跑了一次歌声
+    合成，成片里却听到作曲引擎自带的嗓子——而且这个错误在 ArcReel 内部完全看不出来（分镜、
+    视频、字幕都对，只有音轨是另一个人），要到导入剪辑器试听才发现。
+
+    演唱镜的口型也是按人声轨驱动的（见 ``generation_tasks._resolve_lip_sync_source``），
+    用作曲产物当音轨会让画面在对口型、声音却是另一个人。
+
+    但人声轨比作曲产物旧时反过来退回作曲产物：那说明用户重新作曲后没重跑歌声合成，人声轨
+    唱的是上一版曲子。此时两个选择都不完美，取作曲产物是因为它与当前歌词、字幕、分镜一致，
+    且「嗓子不是我选的那个」用户一听就能发现，从而回去补跑歌声合成；继续用旧人声轨则是把
+    一首完全过时的歌配进成片，听起来一切正常。
+    """
+    music = _first_existing_audio(project_dir, "music", _MAIN_MUSIC_TRACK_ID)
+    vocal = _first_existing_audio(project_dir, "singing", _MAIN_VOCAL_TRACK_ID)
+    if vocal is None:
+        return music
+    if music is not None and is_outdated_by(vocal, music):
+        logger.warning(
+            "人声轨 %s 比作曲产物 %s 旧，成片改用作曲产物；要用歌手音色请重跑 generate_singing",
+            vocal.name,
+            music.name,
+        )
+        return music
+    return vocal
 
 
 def _has_subtitle_track(content_mode: str) -> bool:
@@ -567,7 +615,7 @@ class JianyingDraftService:
             # 配乐与视频素材同样要暂存：草稿里的路径会被整体替换成用户本地剪映目录，
             # 直接引用项目内原路径会让草稿在对方机器上找不到文件。
             music_local: str | None = None
-            music_src = safe_resolve(project_dir, resource_relative_path("music", _MAIN_MUSIC_TRACK_ID))
+            music_src = _resolve_music_track(project_dir)
             if music_src is not None:
                 music_local = stage_once(music_src)
 

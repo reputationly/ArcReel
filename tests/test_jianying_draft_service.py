@@ -569,6 +569,55 @@ class TestGenerateDraft:
         assert content.get("materials", {}).get("texts", []) == []
 
 
+class TestMusicTrackSelection:
+    """成片音轨在「作曲产物」与「人声轨」之间的选取。
+
+    二者是替代关系：svs 的输入 target_audio 就是作曲产物，产出是「换了指定歌手音色重唱的
+    同一首歌」。取错的后果是画面在对口型、声音却是另一个人——而这个错误在 ArcReel 内部完全
+    看不出来（分镜/视频/字幕都对），要到导入剪辑器试听才发现。
+    """
+
+    @pytest.mark.unit
+    def test_prefers_vocal_track_when_singing_exists(self, tmp_path):
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        (tmp_path / "music").mkdir()
+        (tmp_path / "music" / "main.wav").write_bytes(b"RIFFcompose")
+        (tmp_path / "music" / "vocal_main.wav").write_bytes(b"RIFFsing")
+
+        picked = _resolve_music_track(tmp_path)
+        assert picked is not None and picked.name == "vocal_main.wav"
+
+    @pytest.mark.unit
+    def test_falls_back_to_composed_track(self, tmp_path):
+        """没跑歌声合成时用作曲产物——ACE-Step 带歌词产出的本就是完整歌曲。"""
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        (tmp_path / "music").mkdir()
+        (tmp_path / "music" / "main.wav").write_bytes(b"RIFFcompose")
+
+        picked = _resolve_music_track(tmp_path)
+        assert picked is not None and picked.name == "main.wav"
+
+    @pytest.mark.unit
+    def test_no_music_at_all(self, tmp_path):
+        """narration / drama / ad 项目本就没有配乐，缺文件是常态不是异常。"""
+        from server.services.jianying_draft_service import _resolve_music_track
+
+        assert _resolve_music_track(tmp_path) is None
+
+    @pytest.mark.unit
+    def test_export_uses_the_selector(self):
+        """守连接点：选取函数单测全绿、导出仍写死取 main.wav，是这条链最容易退化的形态。"""
+        import inspect
+
+        from server.services.jianying_draft_service import JianyingDraftService
+
+        src = inspect.getsource(JianyingDraftService)
+        assert "_resolve_music_track(project_dir)" in src
+        assert 'resource_relative_path("music", _MAIN_MUSIC_TRACK_ID)' not in src
+
+
 class TestNarrationAudioTrack:
     """测试逐段旁白音轨在剪映草稿中的接入"""
 

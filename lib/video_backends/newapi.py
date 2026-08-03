@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 from pathlib import Path
 
@@ -15,6 +14,7 @@ import httpx
 from lib.aspect_size import VIDEO_TIER_SHORT_EDGE, aspect_size, resolution_to_short_edge
 from lib.logging_utils import format_kwargs_for_log
 from lib.providers import PROVIDER_NEWAPI
+from lib.resource_paths import audio_data_uri
 from lib.retry import (
     DEFAULT_BACKOFF_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
@@ -88,6 +88,7 @@ _GPUSTACK_MODELS = frozenset(
     {
         "wan2.2-t2v",
         "wan2.2-i2v",
+        "wan2.2-flf2v",
         "bernini",
         "infinitetalk-480p",
         "infinitetalk-720p",
@@ -96,7 +97,11 @@ _GPUSTACK_MODELS = frozenset(
 )
 
 #: 支持首尾帧的自建模型：task_type=flf2v，images=[首帧, 尾帧]（门面强制两张）。
-_GPUSTACK_FLF2V_MODELS = frozenset({"wan2.2-i2v"})
+#:
+#: 首尾帧是**独立部署的模型**（wan2.2-flf2v），不是 wan2.2-i2v 的一种任务类型——门面按模型名
+#: 推断 task_type（``strings.Contains(m, "flf2v")``），给 i2v 模型显式下发 flf2v 只会让门面按
+#: 首尾帧物化两张图、再发给一个不认这个任务的引擎。能力声明必须跟着实际部署的模型名走。
+_GPUSTACK_FLF2V_MODELS = frozenset({"wan2.2-flf2v"})
 
 #: 支持纯参考图生视频的自建模型：task_type=r2v，参考图走 metadata.src_ref_images。
 #: Bernini 另有 v2v / rv2v（需源视频），本 backend 暂不涉及——ArcReel 没有「源视频」这一输入。
@@ -270,15 +275,7 @@ class NewAPIVideoBackend(ProviderJobIdPersistenceMixin):
         if not supports_lip_sync(self._model):
             logger.warning("模型 %s 未登记 s2v 能力，驱动音频可能不被门面接受", self._model)
         metadata["task_type"] = "s2v"
-        metadata["audio"] = self._encode_audio(driving_audio)
-
-    @staticmethod
-    def _encode_audio(path: Path) -> str:
-        """驱动音频编码成 data-uri。文件不存在直接抛——静默跳过会产出一段口型乱动的视频。"""
-        if not path.exists():
-            raise FileNotFoundError(f"驱动音频不存在: {path}")
-        payload = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:audio/wav;base64,{payload}"
+        metadata["audio"] = audio_data_uri(driving_audio, label="驱动音频")
 
     def _apply_gpustack_images(
         self,

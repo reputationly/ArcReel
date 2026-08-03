@@ -37,7 +37,7 @@ from lib.prompt_utils import (
     video_prompt_to_yaml,
 )
 from lib.providers import CALL_TYPE_MUSIC
-from lib.resource_paths import END_FRAME_RESOURCE_TYPE, resource_relative_path
+from lib.resource_paths import END_FRAME_RESOURCE_TYPE, is_outdated_by, resource_candidate_paths, resource_relative_path
 from lib.script_models import get_generated_assets, voiceover_text_field
 from lib.script_skeleton import SKELETON_ENTITY_TYPES, SKELETON_ITEM_NOUNS, resolve_script_kind
 from lib.storyboard_sequence import (
@@ -503,8 +503,10 @@ def compute_affected_fingerprints(project_name: str, task_type: str, resource_id
     elif task_type in ("music", "singing"):
         # 重复生成覆写同一路径（一支 MV 一首曲子 / 一条主唱轨）：不进指纹表的话，
         # 前端播放器会一直放缓存里的旧音频，用户听不出「重生成到底有没有生效」。
-        media_rel = resource_relative_path(task_type, resource_id)
-        paths.append((media_rel, project_path / media_rel))
+        # 两种扩展名都列入：产物格式随模型而变，换模型重生成后旧格式那个文件仍在，
+        # 只报新的会让前端继续拿缓存里的旧音频。不存在的路径在下方 exists() 处自然滤掉。
+        for media_rel in resource_candidate_paths(task_type, resource_id):
+            paths.append((media_rel, project_path / media_rel))
 
     result: dict[str, int] = {}
     for rel, abs_path in paths:
@@ -896,8 +898,10 @@ async def execute_music_task(
         result = await backend.generate_music(request)  # type: ignore[attr-defined]
         call.success(result)
 
+    # 落盘路径以 backend 返回的为准：产物格式随模型而变（ACE-Step 出 .mp3、SoulX-Singer 出
+    # .wav），backend 按实际产物改写了扩展名。报调用方一个不存在的路径，后续读取全落空。
     return {
-        "file_path": music_rel,
+        "file_path": result.output_path.relative_to(project_path).as_posix(),
         "resource_type": "music",
         "resource_id": resource_id,
         "duration_seconds": result.duration_seconds,
@@ -908,6 +912,8 @@ async def execute_music_task(
 
 #: MV 主唱人声轨的 resource_id，与 sdk_tools/enqueue_singing.py 同源。
 _MV_MAIN_VOCAL_ID = "main"
+#: MV 作曲产物的 resource_id，与 sdk_tools/enqueue_music.py 同源。
+_MV_MAIN_MUSIC_ID = "main"
 
 
 async def execute_singing_task(
@@ -980,8 +986,9 @@ async def execute_singing_task(
         )
         call.success(result)
 
+    # 同作曲：以 backend 实际落盘的路径为准，不用请求时假定的扩展名。
     return {
-        "file_path": singing_rel,
+        "file_path": result.output_path.relative_to(project_path).as_posix(),
         "resource_type": "singing",
         "resource_id": resource_id,
         "duration_seconds": result.duration_seconds,
@@ -1004,13 +1011,36 @@ def _resolve_lip_sync_source(project: dict, project_path: Path, item: object) ->
     if not item_is_lip_sync(project, item):
         return None
 
-    vocal_rel = resource_relative_path("singing", _MV_MAIN_VOCAL_ID)
-    try:
-        return safe_join(project_path, vocal_rel, require_file=True)
-    except (PathTraversalError, FileNotFoundError) as exc:
+    # 按候选扩展名找：歌声产物格式随模型而变（SoulX-Singer 出 .wav，换模型可能出 .mp3），
+    # 认死一种会把「文件明明生成了」报成「请先合成歌声」。
+    candidates = resource_candidate_paths("singing", _MV_MAIN_VOCAL_ID)
+    vocal: Path | None = None
+    for vocal_rel in candidates:
+        try:
+            vocal = safe_join(project_path, vocal_rel, require_file=True)
+            break
+        except (PathTraversalError, FileNotFoundError):
+            continue
+    if vocal is None:
         raise ValueError(
-            f"演唱镜头需要歌声轨（{vocal_rel}）作口型驱动，但它不可用：请先用 generate_singing 合成歌声"
-        ) from exc
+            f"演唱镜头需要歌声轨（{' / '.join(candidates)}）作口型驱动，但它不可用：请先用 generate_singing 合成歌声"
+        )
+
+    # 人声轨派生自作曲产物，作曲重跑过就作废：用过期人声轨驱动会把「对着上一版旋律的口型」
+    # 烧进视频文件，得重新生成才能纠正（比导出侧同类问题贵一次视频生成的钱）。这里选择拦住
+    # 而非像导出侧那样退回作曲产物——作曲产物是引擎自带嗓子，拿它驱动出的口型同样要作废。
+    for music_rel in resource_candidate_paths("music", _MV_MAIN_MUSIC_ID):
+        try:
+            music = safe_join(project_path, music_rel, require_file=True)
+        except (PathTraversalError, FileNotFoundError):
+            continue
+        if is_outdated_by(vocal, music):
+            raise ValueError(
+                f"歌声轨 {vocal.name} 比作曲产物 {music.name} 旧：重新作曲后需要重跑 "
+                "generate_singing，否则演唱镜的口型对的是上一版曲子"
+            )
+        break
+    return vocal
 
 
 async def _slice_lip_sync_window(source: Path, item: object, output: Path) -> Path:

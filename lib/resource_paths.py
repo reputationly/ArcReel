@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -58,15 +60,85 @@ def _pattern(resource_type: str) -> ResourcePattern:
     return pattern
 
 
-def resource_relative_path(resource_type: str, resource_id: str) -> str:
+#: 音乐 / 歌声类产物可能出现的扩展名（含点，按优先级排列）。
+#:
+#: 同一个 resource_type 下不同模型的产物格式**不同**：ACE-Step 作曲出 ``.mp3``、
+#: SoulX-Singer 歌声合成出 ``.wav``。落盘必须按实际产物的扩展名，读取侧则按 stem 逐个候选找
+#: （``resource_candidate_paths``）。写死一种的后果是内容与后缀不符——把 MP3 存成 ``.wav``，
+#: 之后按后缀推导 MIME 就会给门面贴错标签，而错误发生在引擎侧、指不回标签这一层。
+AUDIO_EXTENSIONS: tuple[str, ...] = (".wav", ".mp3")
+
+#: 扩展名 → data-uri MIME。键集与 ``AUDIO_EXTENSIONS`` 必须一致，故与它同处一个模块——
+#: 分开放会漂移：曾经作曲侧按扩展名取 MIME、口型侧仍写死 WAV，同一条规则两份实现只改了一份。
+AUDIO_MIME_BY_SUFFIX: dict[str, str] = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
+
+
+def is_outdated_by(derived: Path, source: Path) -> bool:
+    """派生产物是否已被它的输入超越（输入更新于产物）。
+
+    MV 里人声轨（``music/vocal_main.*``）派生自作曲产物（``music/main.*``）——
+    ``synthesize_singing`` 的 target_song 就是后者。用户重新作曲却没重跑歌声合成时，盘上两个
+    文件都在，读取侧按「人声轨优先」拿到的是**上一版曲子**唱出来的人声：导出的成片配的是旧曲，
+    演唱镜的口型也对着旧旋律，而 ArcReel 内部完全看不出来（分镜、视频、字幕都对）。
+
+    用 mtime 而非内容指纹：判定跑在导出与视频生成的热路径上，读全文件算哈希不划算；两者都是
+    本地落盘的生成产物，mtime 就是生成时刻。相等判为不过期——同一次流水线里先后落盘的两个
+    文件可能落在同一秒。取不到 mtime 时判为不过期：判定本身失败不该让导出或生成停摆。
+    """
+    try:
+        return source.stat().st_mtime > derived.stat().st_mtime
+    except OSError:
+        return False
+
+
+def audio_data_uri(path: Path, *, label: str) -> str:
+    """音频编码成 data-uri，供门面物化到 input_refs。
+
+    ``label`` 只用于报错文案（「参考音频」/「驱动音频」），让异常直接指出是哪一路入参。
+
+    文件不存在直接抛：静默跳过会退化成一段没有音频驱动的产物（翻唱变随机作曲、演唱镜口型
+    乱动），错误显现在成片里而非调用处。MIME 按扩展名取、未知扩展名 fail-loud——MP3 字节
+    顶着 audio/wav 标签送进门面，物化或解码会在引擎侧失败，指不回「标签贴错了」。
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"{label}不存在: {path}")
+    mime = AUDIO_MIME_BY_SUFFIX.get(path.suffix.lower())
+    if mime is None:
+        raise ValueError(f"不支持的{label}格式: {path.name}（支持 {sorted(AUDIO_MIME_BY_SUFFIX)}）")
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{payload}"
+
+
+def resource_relative_path(resource_type: str, resource_id: str, *, ext: str | None = None) -> str:
     """返回资源在项目内的相对路径（posix，正斜杠）。
 
     storyboards/end_frames/videos 形如 ``storyboards/scene_{id}.png``、audio 形如 ``audio/segment_{id}.wav``；
     其余 ``{subdir}/{id}{ext}``。未知类型抛 ``ValueError``。
+
+    ``ext`` 覆盖默认扩展名（含点，大小写不敏感），供产物格式随模型而变的类型使用——写侧拿到
+    实际产物后按真实扩展名落盘，避免内容与后缀不符。
     """
     pattern = _pattern(resource_type)
     filename = f"{pattern.prefix}{resource_id}"
-    return f"{pattern.subdir}/{filename}{pattern.extension}"
+    suffix = ext.lower() if ext else pattern.extension
+    return f"{pattern.subdir}/{filename}{suffix}"
+
+
+def resource_candidate_paths(resource_type: str, resource_id: str) -> tuple[str, ...]:
+    """该资源所有可能的相对路径（按优先级）。读取侧遍历它来定位实际落盘的那个。
+
+    音频类产物的扩展名随模型而变（见 ``AUDIO_EXTENSIONS``），读取侧按固定扩展名找会漏掉
+    另一种格式——表现为「文件明明生成了，导出/播放却说没有」。非音频类只有一种形状，
+    返回单元素元组，调用方无需分支。
+    """
+    pattern = _pattern(resource_type)
+    if pattern.extension not in AUDIO_EXTENSIONS:
+        return (resource_relative_path(resource_type, resource_id),)
+    ordered = (pattern.extension, *(e for e in AUDIO_EXTENSIONS if e != pattern.extension))
+    return tuple(resource_relative_path(resource_type, resource_id, ext=e) for e in ordered)
 
 
 def resource_extension(resource_type: str) -> str:
