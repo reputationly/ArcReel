@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 if TYPE_CHECKING:
     from server.services.jianying_draft_service import JianyingDraftService
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi import Path as FastAPIPath
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -377,6 +377,63 @@ def export_jianying_draft(
         media_type="application/zip",
         filename=download_name,
         background=BackgroundTask(_cleanup_temp_dir, str(zip_path.parent)),
+    )
+
+
+# --- ChatCut 交接包导出 ---
+
+
+@router.get("/projects/{name}/export/chatcut-handoff")
+def export_chatcut_handoff(
+    name: str,
+    request: Request,
+    _t: Translator,
+    episode: int = Query(..., description="集数编号"),
+    download_token: str = Query(..., description="下载 token"),
+    base_url: str = Query("", description="素材拉取根地址；留空则按传入请求推导"),
+):
+    """导出指定集的 ChatCut 交接包（单个 JSON，素材只写 URL 不打包字节）。
+
+    与剪映导出同走 download_token 而非登录态：交接包由浏览器 ``<a href>`` 直接下载，带不了
+    Authorization 头。
+    """
+    import jwt as pyjwt
+
+    from server.services.chatcut_handoff_service import ChatcutHandoffService
+    from server.services.episode_timeline import NoCompletedSegmentsError
+
+    try:
+        verify_download_token(download_token, name)
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail=_t("download_expired"))
+    except ValueError:
+        raise HTTPException(status_code=403, detail=_t("download_token_mismatch"))
+    except pyjwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail=_t("download_token_invalid"))
+
+    # ArcReel 不知道别人怎么访问它（同机 docker 网络、反代、隧道各不相同），按传入请求推导；
+    # 消费方与 ArcReel 之间的可达地址与浏览器的未必相同，故允许调用方显式指定。
+    resolved_base = base_url.strip() or str(request.base_url).rstrip("/")
+
+    svc = ChatcutHandoffService(get_project_manager())
+    try:
+        payload = svc.build_handoff(name, episode, base_url=resolved_base)
+    except FileNotFoundError:
+        # 项目/剧集不存在：交给 app 级 FileNotFoundError handler 统一 404，
+        # str(e) 可能含服务器路径，不在此回传
+        raise
+    except NoCompletedSegmentsError as e:
+        logger.warning("ChatCut 交接包导出参数错误: project=%s episode=%d (%s)", name, episode, e)
+        raise ApiError("jianying_no_completed_segments", status_code=422, episode=episode) from e
+    except Exception:
+        # 与剪映导出同一处置：路径越界守卫（ValueError，str(e) 带真实路径）属安全告警而非常规
+        # 空态，不应误报为「本集无已完成片段」，一律降级为通用 500，细节只进日志
+        logger.exception("ChatCut 交接包导出失败: project=%s episode=%d", name, episode)
+        raise HTTPException(status_code=500, detail=_t("chatcut_handoff_export_failed"))
+
+    return JSONResponse(
+        content=payload,
+        headers={"Content-Disposition": f'attachment; filename="{name}_episode_{episode}.ccdraft.json"'},
     )
 
 

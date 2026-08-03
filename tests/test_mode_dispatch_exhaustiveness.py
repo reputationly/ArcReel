@@ -426,3 +426,24 @@ class TestTaskTypeCoverage:
         src = inspect.getsource(compute_affected_fingerprints)
         for task_type in ("storyboard", "video", "tts", "music", "singing", "grid", "reference_video"):
             assert f'"{task_type}"' in src, f"{task_type} 的产物不进资源指纹"
+
+
+class TestChatcutHandoffStructureCoverage:
+    """交接包的结构层按 content_mode 分派，新增模式漏登记不会报错——只会导出一份没有创作结构
+    的包，而那正是这个格式存在的理由（时间线剪映草稿已经能给）。"""
+
+    def test_every_content_mode_declares_structure_fields(self):
+        from lib.profile_manifest import VALID_CONTENT_MODES
+        from server.services.chatcut_handoff_service import STRUCTURE_ITEM_FIELDS
+
+        assert set(STRUCTURE_ITEM_FIELDS) == set(VALID_CONTENT_MODES)
+
+    def test_declared_fields_exist_on_the_matching_model(self):
+        """登记的字段名必须真的在对应模式的条目模型上——写错一个字段名同样是静默丢结构。"""
+        from lib.script_models import AdShot, DramaScene, MVShot, NarrationSegment
+        from server.services.chatcut_handoff_service import STRUCTURE_ITEM_FIELDS
+
+        models = {"narration": NarrationSegment, "drama": DramaScene, "ad": AdShot, "mv": MVShot}
+        for mode, fields in STRUCTURE_ITEM_FIELDS.items():
+            known = set(models[mode].model_fields)
+            assert set(fields) <= known, f"{mode} 登记了模型上不存在的字段: {set(fields) - known}"

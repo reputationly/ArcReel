@@ -16,6 +16,7 @@ def make_translator(locale: str = "zh") -> Callable[..., str]:
 
 
 import os
+import shutil
 import subprocess
 import wave
 from io import BytesIO
@@ -46,7 +47,17 @@ def _wav_bytes(duration_seconds: float, sample_rate: int = 8000) -> bytes:
 
 
 def make_test_video(path: Path, *, duration_sec: float = 1.0, fps: int = 30) -> None:
-    """使用 ffmpeg 生成极短测试视频（64x64 像素）"""
+    """使用 ffmpeg 生成极短测试视频（64x64 像素）。
+
+    ffmpeg 缺失时 **skip 而非 fail**：它是 CI 装齐的外部依赖（见 .github/workflows/test.yml），
+    但本地开发机未必有，缺它时一整屏红色会盖住真实回归——分不清「我改坏了」还是「这台机器
+    没装 ffmpeg」，只能靠 git stash 对基线才敢下结论。
+
+    判定放在这里而不是给用例挂标记：需要真实视频的用例分布在若干个类里、且同类中混着不需要
+    视频的用例，按类标记会连不需要 ffmpeg 的一起跳过，按用例标记则每次新增都得记着补一个。
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("需要 ffmpeg 生成测试视频（brew install ffmpeg / apt-get install ffmpeg）")
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [

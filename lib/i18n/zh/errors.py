@@ -13,6 +13,7 @@ MESSAGES = {
     "jianying_path_too_long": "草稿目录路径过长",
     "jianying_path_illegal": "草稿目录路径包含非法字符",
     "jianying_export_failed": "剪映草稿导出失败，请稍后重试",
+    "chatcut_handoff_export_failed": "ChatCut 交接包导出失败，请稍后重试",
     "title_required": "项目标题不能为空",
     "project_exists": "项目 '{name}' 已存在",
     "script_not_found": "剧本 '{name}' 不存在",

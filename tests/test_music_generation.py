@@ -517,19 +517,19 @@ class TestStaleVocalAgainstMusic:
 
     @pytest.mark.unit
     def test_export_falls_back_to_composition(self, tmp_path: Path):
-        from server.services.jianying_draft_service import _resolve_music_track
+        from server.services.episode_timeline import resolve_music_track
 
         self._write_pair(tmp_path, vocal_first=True)
-        resolved = _resolve_music_track(tmp_path)
+        resolved = resolve_music_track(tmp_path)
         assert resolved is not None and resolved.name == "main.wav"
 
     @pytest.mark.unit
     def test_export_still_prefers_a_current_vocal(self, tmp_path: Path):
         """反向：人声轨是新的时仍然优先它——退回逻辑不能把正常情况一起改坏。"""
-        from server.services.jianying_draft_service import _resolve_music_track
+        from server.services.episode_timeline import resolve_music_track
 
         self._write_pair(tmp_path, vocal_first=False)
-        resolved = _resolve_music_track(tmp_path)
+        resolved = resolve_music_track(tmp_path)
         assert resolved is not None and resolved.name == "vocal_main.wav"
 
     @pytest.mark.unit
@@ -557,10 +557,10 @@ class TestStaleVocalAgainstMusic:
         """守连接点：两处「人声轨优先」的读取侧都要判过期，只改一处另一处继续用旧轨。"""
         import inspect
 
+        from server.services.episode_timeline import resolve_music_track
         from server.services.generation_tasks import _resolve_lip_sync_source
-        from server.services.jianying_draft_service import _resolve_music_track
 
-        for fn in (_resolve_lip_sync_source, _resolve_music_track):
+        for fn in (_resolve_lip_sync_source, resolve_music_track):
             assert "is_outdated_by(" in inspect.getsource(fn), fn.__name__
 
 
@@ -643,10 +643,10 @@ class TestAudioExtensionFidelity:
         """守连接点：三处读取侧都要按候选找，认死默认扩展名就会漏掉另一格式。"""
         import inspect
 
+        from server.services.episode_timeline import first_existing_audio
         from server.services.generation_tasks import _resolve_lip_sync_source, compute_affected_fingerprints
-        from server.services.jianying_draft_service import _first_existing_audio
 
-        for fn in (_resolve_lip_sync_source, compute_affected_fingerprints, _first_existing_audio):
+        for fn in (_resolve_lip_sync_source, compute_affected_fingerprints, first_existing_audio):
             assert "resource_candidate_paths(" in inspect.getsource(fn), fn.__name__
 
     @pytest.mark.unit

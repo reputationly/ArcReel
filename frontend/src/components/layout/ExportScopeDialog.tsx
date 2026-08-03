@@ -3,6 +3,7 @@ import {
   Package,
   History,
   Clapperboard,
+  Waypoints,
   ArrowLeft,
   Loader2,
   PackageCheck,
@@ -14,7 +15,7 @@ import type { RefObject, ReactNode } from "react";
 import type { EpisodeMeta } from "@/types/project";
 import { WARM_TONE } from "@/utils/severity-tone";
 
-export type ExportScope = "current" | "full" | "jianying-draft";
+export type ExportScope = "current" | "full" | "jianying-draft" | "chatcut-handoff";
 
 const DRAFT_PATH_STORAGE_KEY = "arcreel_jianying_draft_path";
 
@@ -26,6 +27,8 @@ interface ExportScopeDialogProps {
   episodes?: EpisodeMeta[];
   onJianyingExport?: (episode: number, draftPath: string, jianyingVersion: string) => void;
   jianyingExporting?: boolean;
+  onChatcutExport?: (episode: number) => void;
+  chatcutExporting?: boolean;
 }
 
 export function ExportScopeDialog({
@@ -36,9 +39,11 @@ export function ExportScopeDialog({
   episodes = [],
   onJianyingExport,
   jianyingExporting = false,
+  onChatcutExport,
+  chatcutExporting = false,
 }: ExportScopeDialogProps) {
   const { t } = useTranslation(["dashboard", "common"]);
-  const [mode, setMode] = useState<"select" | "jianying-form">("select");
+  const [mode, setMode] = useState<"select" | "jianying-form" | "chatcut-form">("select");
   const [selectedEpisode, setSelectedEpisode] = useState<number>(
     episodes.length > 0 ? episodes[0].episode : 1,
   );
@@ -70,6 +75,17 @@ export function ExportScopeDialog({
     if (!draftPath.trim() || !onJianyingExport) return;
     localStorage.setItem(DRAFT_PATH_STORAGE_KEY, draftPath.trim());
     onJianyingExport(selectedEpisode, draftPath.trim(), jianyingVersion);
+  };
+
+  // 交接包只需要集数，而单集模式（广告 / MV）根本没得选——弹一个只有一个选项的下拉，
+  // 是在问一个只有一个答案的问题。多集才进选集页，单集直接导出。
+  const handleChatcutClick = () => {
+    if (!onChatcutExport) return;
+    if (episodes.length > 1) {
+      setMode("chatcut-form");
+      return;
+    }
+    onChatcutExport(episodes[0]?.episode ?? 1);
   };
 
   return (
@@ -116,6 +132,7 @@ export function ExportScopeDialog({
           </div>
 
           <div className="flex flex-col gap-2">
+            <SectionLabel>{t("dashboard:export_group_archive")}</SectionLabel>
             <ScopeOption
               icon={<Package className="h-4 w-4" />}
               title={
@@ -145,12 +162,20 @@ export function ExportScopeDialog({
               tone="neutral"
               onClick={() => onSelect("full")}
             />
+            <SectionLabel>{t("dashboard:export_group_handoff")}</SectionLabel>
             <ScopeOption
               icon={<Clapperboard className="h-4 w-4" />}
               title={t("dashboard:export_jianying_draft")}
               hint={t("dashboard:generate_jianying_zip_hint")}
               tone="warm"
               onClick={() => setMode("jianying-form")}
+            />
+            <ScopeOption
+              icon={<Waypoints className="h-4 w-4" />}
+              title={t("dashboard:export_chatcut_handoff")}
+              hint={t("dashboard:chatcut_handoff_hint")}
+              tone="warm"
+              onClick={handleChatcutClick}
             />
           </div>
         </div>
@@ -176,23 +201,29 @@ export function ExportScopeDialog({
                 boxShadow: `0 8px 18px -8px ${WARM_TONE.glow}`,
               }}
             >
-              <Clapperboard className="h-3.5 w-3.5" />
+              {mode === "jianying-form" ? (
+                <Clapperboard className="h-3.5 w-3.5" />
+              ) : (
+                <Waypoints className="h-3.5 w-3.5" />
+              )}
             </span>
             <div
               className="display-serif text-[14px] font-semibold tracking-tight"
               style={{ color: "var(--color-text)" }}
             >
-              {t("dashboard:export_jianying_draft")}
+              {mode === "jianying-form"
+                ? t("dashboard:export_jianying_draft")
+                : t("dashboard:export_chatcut_handoff")}
             </div>
           </div>
           <div className="flex flex-col gap-3">
             {episodes.length > 1 && (
               <FormField
-                htmlFor="jianying-episode-select"
+                htmlFor="export-episode-select"
                 label={t("dashboard:select_episode")}
               >
                 <select
-                  id="jianying-episode-select"
+                  id="export-episode-select"
                   value={selectedEpisode}
                   onChange={(e) => setSelectedEpisode(Number(e.target.value))}
                   className="focus-ring w-full rounded-md px-2.5 py-1.5 text-[13px] outline-none"
@@ -214,6 +245,24 @@ export function ExportScopeDialog({
               </FormField>
             )}
 
+            {mode === "chatcut-form" ? (
+              <PrimaryButton
+                tone="warm"
+                size="sm"
+                onClick={() => onChatcutExport?.(selectedEpisode)}
+                disabled={chatcutExporting}
+                leadingIcon={
+                  chatcutExporting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : undefined
+                }
+              >
+                {chatcutExporting
+                  ? t("dashboard:exporting")
+                  : t("dashboard:export_handoff")}
+              </PrimaryButton>
+            ) : (
+              <>
             <FormField
               htmlFor="jianying-version-select"
               label={t("dashboard:jianying_version")}
@@ -270,10 +319,32 @@ export function ExportScopeDialog({
                 ? t("dashboard:exporting")
                 : t("dashboard:export_draft")}
             </PrimaryButton>
+              </>
+            )}
           </div>
         </div>
       )}
     </GlassPopover>
+  );
+}
+
+/**
+ * 选项分组的小标题。
+ *
+ * 四个导出项其实是两类东西：上两项是 ArcReel 自己的归档包（能再导回 ArcReel），下两项是
+ * 交给外部剪辑软件的单向交付。扁平列到第四项就分不清了，这条分界把关系写明。
+ *
+ * 第一组之前不画横线——它紧跟标题，再加一条线只是噪音。
+ */
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="num mt-1.5 flex items-center gap-2 text-[9.5px] uppercase first:mt-0"
+      style={{ color: "var(--color-text-4)", letterSpacing: "1.0px" }}
+    >
+      <span className="shrink-0">{children}</span>
+      <span aria-hidden className="h-px flex-1" style={{ background: "var(--color-hairline)" }} />
+    </div>
   );
 }
 

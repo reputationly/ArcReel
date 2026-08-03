@@ -13,6 +13,7 @@ MESSAGES = {
     "jianying_path_too_long": "Draft directory path is too long",
     "jianying_path_illegal": "Draft directory path contains illegal characters",
     "jianying_export_failed": "Jianying draft export failed, please try again later",
+    "chatcut_handoff_export_failed": "ChatCut handoff export failed, please try again later",
     "title_required": "Project title cannot be empty",
     "project_exists": "Project '{name}' already exists",
     "script_not_found": "Script '{name}' does not exist",

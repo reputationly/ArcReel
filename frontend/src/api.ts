@@ -579,6 +579,16 @@ class API {
     return `${API_BASE}/projects/${encodeURIComponent(projectName)}/export/jianying-draft?episode=${encodeURIComponent(episode)}&draft_path=${encodeURIComponent(draftPath)}&download_token=${encodeURIComponent(downloadToken)}&jianying_version=${encodeURIComponent(jianyingVersion)}`;
   }
 
+  /** 构造 OpenChatCut 交接包下载 URL。base_url 留给后端按请求推导——前端不知道剪辑器那侧
+   * 怎么访问 ArcReel（同机 docker 网络、反代、隧道各不相同），猜一个反而会写死错的。 */
+  static getChatcutHandoffDownloadUrl(
+    projectName: string,
+    episode: number,
+    downloadToken: string,
+  ): string {
+    return `${API_BASE}/projects/${encodeURIComponent(projectName)}/export/chatcut-handoff?episode=${encodeURIComponent(episode)}&download_token=${encodeURIComponent(downloadToken)}`;
+  }
+
   static async importProject(
     file: File,
     conflictPolicy: ImportConflictPolicy = "prompt"

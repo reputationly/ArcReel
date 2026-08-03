@@ -36,126 +36,24 @@ _TRANSITION_MAP: dict[str, TransitionType] = {
     "dissolve": TransitionType.叠化,
 }
 
-# 字幕由有序 span 派生（而非单字段）的内容模式。drama 从 utterances 派生 subtitle_spans；
-# ad + reference_video 路径虽也产 span，但 content_mode 仍是 ad（已在 SUBTITLE_TEXT_FIELDS），
-# 故此处只列 drama。未注册且不在此集合的模式（未知脏值）不挂字幕轨。
-_SPAN_SUBTITLE_MODES: frozenset[str] = frozenset({"drama"})
-
-from lib.path_safety import PathTraversalError, safe_join, safe_resolve
+from lib.path_safety import PathTraversalError, safe_join
 from lib.project_manager import ProjectManager, effective_mode
-from lib.reference_video.ad_units import ad_shots_by_id
-from lib.resource_paths import is_outdated_by, resource_candidate_paths
-from lib.script_models import SUBTITLE_TEXT_FIELDS, ad_shot_duration_seconds, get_generated_assets
-from lib.script_skeleton import SKELETONS, resolve_declared_kind
-from lib.speech_rate import estimate_spoken_seconds
 
-# content_mode → 整段单字幕文案源字段，收敛到 lib.script_models 单点声明。
-# 该表是 TTS 口播表的超集：narration / ad 两条链读同一份文案（各写一份会漂移成
-# 「字幕有词、配音没声」），mv 只在字幕侧登记——歌词是字幕但不能拿去念。
-# drama 不在表内：口播是场景级有序 utterances，按 span 逐条派生
-# （见 _SPAN_SUBTITLE_MODES / _utterance_subtitle_spans）。
-_SUBTITLE_TEXT_FIELDS = SUBTITLE_TEXT_FIELDS
-
-#: 项目级单曲的固定 resource_id，与 sdk_tools/enqueue_music.py 同源。
-_MAIN_MUSIC_TRACK_ID = "main"
-#: 主唱人声轨的固定 resource_id，与 sdk_tools/enqueue_singing.py 同源。
-_MAIN_VOCAL_TRACK_ID = "main"
+# 片段收集、字幕 span 派生、音轨选择、画布尺寸都与目标格式无关，与 ChatCut 交接包共用同一份
+# （见 episode_timeline 模块 docstring）——复制一份的代价是新增内容模式时要改两处，
+# 而漏改的那一处不报错，只导出一份内容不全的草稿。
+from server.services.episode_timeline import (
+    NoCompletedSegmentsError,
+    collect_video_clips,
+    has_subtitle_track,
+    resolve_canvas_size,
+    resolve_music_track,
+    script_content_mode,
+)
 
 logger = logging.getLogger(__name__)
 
-
-def _first_existing_audio(project_dir: Path, resource_type: str, resource_id: str) -> Path | None:
-    """按候选扩展名找音频产物。
-
-    产物格式随模型而变（ACE-Step 出 .mp3、SoulX-Singer 出 .wav），认死一种会漏掉另一格式的
-    文件——表现为「曲子明明生成了，导出的草稿却没有音乐轨」。
-    """
-    for rel in resource_candidate_paths(resource_type, resource_id):
-        found = safe_resolve(project_dir, rel)
-        if found is not None:
-            return found
-    return None
-
-
-def _resolve_music_track(project_dir: Path) -> Path | None:
-    """成片音轨：做过歌声合成就用人声轨，否则用作曲产物。
-
-    二者是**替代关系而非叠加**：``generate_singing`` 的输入 ``target_audio`` 就是作曲产物
-    ``music/main.wav``，产出是「换了指定歌手音色重唱的同一首完整歌曲」。同时挂两条会变成
-    两个人在唱同一首。
-
-    人声轨优先的理由是它更贴近用户意图：用户专门确认过歌手的音色参考、专门跑了一次歌声
-    合成，成片里却听到作曲引擎自带的嗓子——而且这个错误在 ArcReel 内部完全看不出来（分镜、
-    视频、字幕都对，只有音轨是另一个人），要到导入剪辑器试听才发现。
-
-    演唱镜的口型也是按人声轨驱动的（见 ``generation_tasks._resolve_lip_sync_source``），
-    用作曲产物当音轨会让画面在对口型、声音却是另一个人。
-
-    但人声轨比作曲产物旧时反过来退回作曲产物：那说明用户重新作曲后没重跑歌声合成，人声轨
-    唱的是上一版曲子。此时两个选择都不完美，取作曲产物是因为它与当前歌词、字幕、分镜一致，
-    且「嗓子不是我选的那个」用户一听就能发现，从而回去补跑歌声合成；继续用旧人声轨则是把
-    一首完全过时的歌配进成片，听起来一切正常。
-    """
-    music = _first_existing_audio(project_dir, "music", _MAIN_MUSIC_TRACK_ID)
-    vocal = _first_existing_audio(project_dir, "singing", _MAIN_VOCAL_TRACK_ID)
-    if vocal is None:
-        return music
-    if music is not None and is_outdated_by(vocal, music):
-        logger.warning(
-            "人声轨 %s 比作曲产物 %s 旧，成片改用作曲产物；要用歌手音色请重跑 generate_singing",
-            vocal.name,
-            music.name,
-        )
-        return music
-    return vocal
-
-
-def _has_subtitle_track(content_mode: str) -> bool:
-    """该内容模式是否注册为字幕模式（生成字幕轨）。
-
-    单字段模式（narration / ad）与 span 派生模式（drama）都为真；未注册的未知脏值为假。
-    """
-    return content_mode in _SUBTITLE_TEXT_FIELDS or content_mode in _SPAN_SUBTITLE_MODES
-
-
-def _utterance_subtitle_spans(utterances: object, language: str | None) -> list[dict[str, Any]]:
-    """从 drama 场景的有序 utterances 派生 subtitle_spans。
-
-    台词（dialogue）与画外音（voiceover）一并成字幕、按 utterances 真实先后排列；每条时长
-    按语速估算（``estimate_spoken_seconds``，单一真相源），顺次摆放、offset 累加。空 / 纯空白
-    text、非 dict 条目、估时长为 0 的条目跳过且不占 offset——既不产退化字幕，也不留空位。
-    不依场景时长拉伸：估算总时长可短于场景，余下自然留白、不撑满场景。
-    """
-    spans: list[dict[str, Any]] = []
-    offset = 0.0
-    for utterance in utterances if isinstance(utterances, list) else []:
-        if not isinstance(utterance, dict):
-            continue
-        text = utterance.get("text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        duration = estimate_spoken_seconds(text, language)
-        if duration <= 0:
-            continue
-        spans.append({"offset_seconds": offset, "duration_seconds": duration, "text": text})
-        offset += duration
-    return spans
-
-
-def _script_content_mode(script: dict) -> str:
-    """读取剧本 content_mode 供内容-行为分派（字幕轨 / 草稿命名）；非字符串脏值归一为空串。
-
-    归一后基于成员判定的字幕轨分派（``_SUBTITLE_TEXT_FIELDS`` / ``_SPAN_SUBTITLE_MODES``）
-    不会因不可哈希的脏值抛 TypeError；脏值不挂字幕轨，与历史一致。骨架分派另走
-    ``resolve_declared_kind``（读剧本原值、缺失/未知 fail-loud），不经此归一。
-    """
-    value = script.get("content_mode", "narration")
-    return value if isinstance(value, str) else ""
-
-
-class NoCompletedSegmentsError(ValueError):
-    """本集没有已完成视频片段，与暂存/写入阶段的路径越界守卫错误区分——后者属于安全告警，
-    不应被路由层误报成「请先生成视频」的常规空态。"""
+__all__ = ["JianyingDraftService", "NoCompletedSegmentsError"]
 
 
 class JianyingDraftService:
@@ -179,131 +77,6 @@ class JianyingDraftService:
         filename = Path(script_file).name
         script_data = self.pm.load_script(project_name, filename)
         return script_data, filename
-
-    def _collect_video_clips(
-        self,
-        script: dict,
-        project_dir: Path,
-        *,
-        generation_mode: str | None = None,
-        language: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """从剧本中提取已完成视频的片段列表
-
-        分镜列表按 ``resolve_declared_kind`` 定内容骨架（narration→segments、drama→scenes、
-        ad→shots；缺失/未知 content_mode fail-loud，不静默兜底）；字幕文案按
-        ``_SUBTITLE_TEXT_FIELDS`` 取各模式的文案源字段，归一到 ``subtitle_text``。drama 改走 span 派生：从场景级
-        有序 ``utterances`` 按语速估算出 ``subtitle_spans``（``language`` 决定语速，由调用方
-        按项目 ``source_language`` 传入），整段 ``subtitle_text`` 留空。
-
-        ad + reference_video 路径成片是 unit 级视频（``reference_units`` 派生索引），
-        按 unit 收集；``generation_mode`` 须由调用方按 project.json 解析传入——
-        ad 剧本不打 generation_mode 戳，且切回 storyboard 后残留索引不应抢走收集。
-        """
-        content_mode = _script_content_mode(script)
-        if content_mode == "ad" and generation_mode == "reference_video":
-            return self._collect_ad_reference_unit_clips(script, project_dir)
-        # 内容骨架经规范解析定分镜数组：content_mode 取剧本原值（缺失/未知即 fail-loud，不静默
-        # 兜底到 drama）。generation_mode 传 None——ad+参考已在上分支按 unit 收集，本分支只按
-        # content_mode 取内容骨架，非 ad 参考路径的 video_units 收集不属本分支职责。
-        kind = resolve_declared_kind(script.get("content_mode"), None)
-        items = script.get(kind, [])
-        id_field = SKELETONS[kind].id_field
-        subtitle_field = _SUBTITLE_TEXT_FIELDS.get(content_mode)
-        is_drama = content_mode == "drama"
-
-        clips = []
-        for item in items:
-            assets = get_generated_assets(item)
-            video_clip = assets.get("video_clip")
-            if not video_clip:
-                continue
-
-            abs_path = safe_resolve(project_dir, video_clip)
-            if abs_path is None:
-                logger.warning("video_clip 不可用（越界或文件不存在），已跳过: %s", video_clip)
-                continue
-
-            # 字幕文案只接受字符串：手编剧本写入数字/列表等脏值时按缺失处理，
-            # 不让单镜头脏数据把整次导出带崩（TextSegment 对非 str 序列化即抛错）
-            subtitle_value = item.get(subtitle_field) if subtitle_field else None
-
-            clip: dict[str, Any] = {
-                "id": item.get(id_field, ""),
-                "duration_seconds": item.get("duration_seconds", 8),
-                "video_clip": video_clip,
-                "abs_path": abs_path,
-                "subtitle_text": subtitle_value if isinstance(subtitle_value, str) else "",
-                "transition_to_next": item.get("transition_to_next", "cut"),
-                "narration_audio_abs": safe_resolve(project_dir, assets.get("narration_audio")),
-            }
-            # drama：从场景 utterances 派生有序字幕 span（台词 + 画外音按真实先后，按语速估时长）
-            if is_drama:
-                clip["subtitle_spans"] = _utterance_subtitle_spans(item.get("utterances"), language)
-            clips.append(clip)
-
-        return clips
-
-    def _collect_ad_reference_unit_clips(self, script: dict, project_dir: Path) -> list[dict[str, Any]]:
-        """ad 参考直出的 unit 级片段收集：字幕按成员镜头口播在 unit 内逐镜头对齐。
-
-        成员镜头从 shots（内容唯一真相）按 shot_ids 水合：字幕 span 的偏移/时长取
-        规划时长（与生成请求一致）；unit 间转场取末位成员镜头的 ``transition_to_next``。
-        悬空 shot_id（索引过期）按缺失成员跳过其字幕，不阻断导出。
-        """
-        shots_by_id = ad_shots_by_id(script)
-
-        clips: list[dict[str, Any]] = []
-        units = script.get("reference_units")
-        for unit in units if isinstance(units, list) else []:
-            if not isinstance(unit, dict):
-                continue
-            video_clip = get_generated_assets(unit).get("video_clip")
-            if not video_clip:
-                continue
-            abs_path = safe_resolve(project_dir, video_clip)
-            if abs_path is None:
-                logger.warning("video_clip 不可用（越界或文件不存在），已跳过: %s", video_clip)
-                continue
-
-            spans: list[dict[str, Any]] = []
-            offset = 0
-            transition = "cut"
-            member_shots = [shots_by_id.get(sid) for sid in unit.get("shot_ids") or []]
-            for shot in member_shots:
-                if shot is None:
-                    continue
-                duration = ad_shot_duration_seconds(shot)
-                text = shot.get("voiceover_text")
-                if isinstance(text, str) and text and duration > 0:
-                    spans.append({"offset_seconds": offset, "duration_seconds": duration, "text": text})
-                offset += max(duration, 0)
-                transition = shot.get("transition_to_next", "cut")
-
-            clips.append(
-                {
-                    "id": unit.get("unit_id", ""),
-                    "duration_seconds": offset,
-                    "video_clip": video_clip,
-                    "abs_path": abs_path,
-                    "subtitle_text": "",
-                    "subtitle_spans": spans,
-                    "transition_to_next": transition,
-                    "narration_audio_abs": None,
-                }
-            )
-        return clips
-
-    def _resolve_canvas_size(self, project: dict, first_video_path: Path | None = None) -> tuple[int, int]:
-        """根据项目 aspect_ratio 确定画布尺寸，缺失时从首个视频自动检测"""
-        ar = project.get("aspect_ratio")
-        aspect = ar if isinstance(ar, str) else (ar.get("video") if isinstance(ar, dict) else None)
-        if aspect is None and first_video_path is not None:
-            mat = VideoMaterial(str(first_video_path))
-            aspect = "9:16" if mat.height > mat.width else "16:9"
-        if aspect == "9:16":
-            return 1080, 1920
-        return 1920, 1080
 
     @staticmethod
     def _stage_file(src: Path, staging_dir: Path) -> Path:
@@ -348,7 +121,7 @@ class JianyingDraftService:
         script_file.add_track(TrackType.video)
 
         # 字幕轨：注册为字幕模式的内容模式生成（narration / ad 单字段、drama 从 utterances 派生 span）
-        has_subtitle = _has_subtitle_track(content_mode)
+        has_subtitle = has_subtitle_track(content_mode)
         text_style: TextStyle | None = None
         text_border: TextBorder | None = None
         text_shadow: TextShadow | None = None
@@ -387,6 +160,14 @@ class JianyingDraftService:
             # 预读实际视频时长
             material = VideoMaterial(clip["local_path"])
             actual_duration_us = material.duration
+
+            # 声明了绝对入点就钉在那里：MV 的镜头对着歌曲时间轴，而实际产出时长按供应商档位
+            # 取整、偏离规划值是常态——累加排布会让后面整条错位，且演唱镜的口型是按绝对歌曲
+            # 位置切的驱动音频生成的，一漂移就对不上音乐。只有 MVShot 声明该字段，其余骨架
+            # 取 None 走原有的累加。
+            declared_start = clip.get("start_seconds")
+            if declared_start is not None:
+                offset_us = int(float(declared_start) * 1_000_000)
 
             # 视频片段
             video_seg = VideoSegment(
@@ -555,11 +336,11 @@ class JianyingDraftService:
         script_data, _ = self._find_episode_script(project_name, project, episode)
 
         # 2. 收集已完成视频（生成路径按 project.json 解析：ad 参考直出收集 unit 级片段）
-        content_mode = _script_content_mode(script_data)
+        content_mode = script_content_mode(script_data)
         ep_entry = next((e for e in project.get("episodes", []) if e.get("episode") == episode), None)
         # drama 字幕语速按项目源语言取（source_language 是唯一真相源，缺失 / 脏值时回退默认语速）
         source_language = project.get("source_language")
-        clips = self._collect_video_clips(
+        clips = collect_video_clips(
             script_data,
             project_dir,
             generation_mode=effective_mode(project=project, episode=ep_entry or {}),
@@ -569,7 +350,7 @@ class JianyingDraftService:
             raise NoCompletedSegmentsError(f"第 {episode} 集没有已完成的视频片段，请先生成视频")
 
         # 3. 画布尺寸（项目未设 aspect_ratio 时从首个视频自动检测）
-        width, height = self._resolve_canvas_size(project, clips[0]["abs_path"])
+        width, height = resolve_canvas_size(project, clips[0]["abs_path"])
 
         # 4. 创建临时目录 + 复制素材到暂存区
         raw_title = project.get("title")
@@ -615,7 +396,7 @@ class JianyingDraftService:
             # 配乐与视频素材同样要暂存：草稿里的路径会被整体替换成用户本地剪映目录，
             # 直接引用项目内原路径会让草稿在对方机器上找不到文件。
             music_local: str | None = None
-            music_src = _resolve_music_track(project_dir)
+            music_src = resolve_music_track(project_dir)
             if music_src is not None:
                 music_local = stage_once(music_src)
 

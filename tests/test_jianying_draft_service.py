@@ -11,7 +11,9 @@ class TestCollectVideoClips:
 
     def test_narration_mode_collects_existing_videos(self, tmp_path):
         """narration 模式：收集存在的 video_clip"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -43,8 +45,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 2
         assert clips[0]["id"] == "S1"
@@ -53,7 +54,9 @@ class TestCollectVideoClips:
 
     def test_drama_mode_collects_scenes(self, tmp_path):
         """drama 模式：收集 scenes 而非 segments"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -71,8 +74,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 1
         assert clips[0]["id"] == "E1S01"
@@ -82,7 +84,9 @@ class TestCollectVideoClips:
         """drama：从 utterances 按真实先后派生 subtitle_spans，台词 / 画外音交错保持顺序，
         时长按语速估算、顺次摆放（offset 累加）。"""
         from lib.speech_rate import estimate_spoken_seconds
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -106,8 +110,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 1
         spans = clips[0]["subtitle_spans"]
@@ -125,7 +128,9 @@ class TestCollectVideoClips:
 
     def test_drama_subtitle_spans_allow_gap_not_filling_scene(self, tmp_path):
         """drama：短台词按语速估时长，不撑满长场景，余下留白。"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -144,8 +149,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         clip = clips[0]
         assert clip["duration_seconds"] == 30
@@ -154,7 +158,9 @@ class TestCollectVideoClips:
 
     def test_drama_subtitle_spans_skip_empty_and_malformed_utterances(self, tmp_path):
         """drama：空 / 纯空白 text 与非 dict 条目不产 span、不阻断收集，offset 不留空位。"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -177,8 +183,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         spans = clips[0]["subtitle_spans"]
         assert [s["text"] for s in spans] == ["开始"]
@@ -186,7 +191,9 @@ class TestCollectVideoClips:
 
     def test_ad_mode_collects_shots_with_voiceover_subtitle(self, tmp_path):
         """ad 模式：收集 shots，字幕文案取每镜头 voiceover_text"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -221,8 +228,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 2
         assert clips[0]["id"] == "E1S1"
@@ -232,7 +238,9 @@ class TestCollectVideoClips:
 
     def test_tolerates_corrupt_generated_assets(self, tmp_path):
         """generated_assets 为非 dict 脏数据（如字符串）时按缺失处理，不抛 AttributeError"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         project_dir.mkdir(parents=True)
@@ -249,14 +257,15 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 0
 
     def test_skips_missing_video_files(self, tmp_path):
         """script 中有记录但文件不存在时跳过"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         project_dir.mkdir(parents=True)
@@ -273,8 +282,7 @@ class TestCollectVideoClips:
             ],
         }
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
 
         assert len(clips) == 0
 
@@ -300,7 +308,9 @@ class TestCollectNarrationAudio:
 
     def test_collects_existing_narration_audio(self, tmp_path):
         """段含 narration_audio 且文件存在时收集其绝对路径"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         (project_dir / "videos").mkdir(parents=True)
@@ -308,51 +318,53 @@ class TestCollectNarrationAudio:
         (project_dir / "audio").mkdir()
         (project_dir / "audio" / "segment_S1.wav").write_bytes(b"fake")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(self._make_script("audio/segment_S1.wav"), project_dir)
+        clips = collect_video_clips(self._make_script("audio/segment_S1.wav"), project_dir)
 
         assert len(clips) == 1
         assert clips[0]["narration_audio_abs"] == (project_dir / "audio" / "segment_S1.wav").resolve()
 
     def test_segment_without_narration_audio_yields_none(self, tmp_path):
         """缺 narration_audio 的段不报错，音频路径为 None"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         (project_dir / "videos").mkdir(parents=True)
         (project_dir / "videos" / "segment_S1.mp4").write_bytes(b"fake")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(self._make_script(None), project_dir)
+        clips = collect_video_clips(self._make_script(None), project_dir)
 
         assert len(clips) == 1
         assert clips[0]["narration_audio_abs"] is None
 
     def test_missing_audio_file_yields_none(self, tmp_path):
         """narration_audio 有记录但文件不存在时视同缺失"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         (project_dir / "videos").mkdir(parents=True)
         (project_dir / "videos" / "segment_S1.mp4").write_bytes(b"fake")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(self._make_script("audio/segment_S1.wav"), project_dir)
+        clips = collect_video_clips(self._make_script("audio/segment_S1.wav"), project_dir)
 
         assert len(clips) == 1
         assert clips[0]["narration_audio_abs"] is None
 
     def test_path_traversal_audio_yields_none(self, tmp_path):
         """narration_audio 路径越界时视同缺失，视频照常导出"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         (project_dir / "videos").mkdir(parents=True)
         (project_dir / "videos" / "segment_S1.mp4").write_bytes(b"fake")
         (tmp_path / "secret.wav").write_bytes(b"fake")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(self._make_script("../../secret.wav"), project_dir)
+        clips = collect_video_clips(self._make_script("../../secret.wav"), project_dir)
 
         assert len(clips) == 1
         assert clips[0]["narration_audio_abs"] is None
@@ -362,24 +374,27 @@ class TestResolveCanvasSize:
     """测试画布尺寸解析"""
 
     def test_16_9_returns_1920x1080(self):
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            resolve_canvas_size,
+        )
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        w, h = svc._resolve_canvas_size({"aspect_ratio": {"video": "16:9"}})
+        w, h = resolve_canvas_size({"aspect_ratio": {"video": "16:9"}})
         assert (w, h) == (1920, 1080)
 
     def test_9_16_returns_1080x1920(self):
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            resolve_canvas_size,
+        )
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        w, h = svc._resolve_canvas_size({"aspect_ratio": {"video": "9:16"}})
+        w, h = resolve_canvas_size({"aspect_ratio": {"video": "9:16"}})
         assert (w, h) == (1080, 1920)
 
     def test_default_is_16_9(self):
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            resolve_canvas_size,
+        )
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        w, h = svc._resolve_canvas_size({})
+        w, h = resolve_canvas_size({})
         assert (w, h) == (1920, 1080)
 
 
@@ -390,8 +405,10 @@ class TestGenerateDraft:
     """测试 pyjianyingdraft 草稿生成"""
 
     def test_generates_draft_content_json(self, tmp_path):
-        """生成的草稿目录包含 draft_content.json"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """生成的草稿目录包含 draft_content.json"""
 
         # 视频文件放在 draft_dir 外部，避免被 create_draft 清理
         videos_dir = tmp_path / "videos"
@@ -406,7 +423,6 @@ class TestGenerateDraft:
             {"id": "S2", "local_path": str(videos_dir / "scene_S2.mp4"), "subtitle_text": ""},
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="测试草稿",
@@ -420,8 +436,10 @@ class TestGenerateDraft:
         assert (draft_dir / "draft_meta_info.json").exists()
 
     def test_narration_mode_includes_subtitle_track(self, tmp_path):
-        """narration 模式生成字幕轨"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """narration 模式生成字幕轨"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -433,7 +451,6 @@ class TestGenerateDraft:
             {"id": "S1", "local_path": str(videos_dir / "seg_S1.mp4"), "subtitle_text": "从前有座山"},
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="字幕草稿",
@@ -448,8 +465,10 @@ class TestGenerateDraft:
         assert len(tracks) == 2
 
     def test_ad_mode_includes_voiceover_subtitle_track(self, tmp_path):
-        """ad 模式生成字幕轨：文本取口播文案，逐镜头与视频时间轴对齐，位于竖屏 safe-zone"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """ad 模式生成字幕轨：文本取口播文案，逐镜头与视频时间轴对齐，位于竖屏 safe-zone"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -463,7 +482,6 @@ class TestGenerateDraft:
             {"id": "E1S2", "local_path": str(videos_dir / "shot_E1S2.mp4"), "subtitle_text": "点击下方链接立即下单"},
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="广告草稿",
@@ -496,8 +514,10 @@ class TestGenerateDraft:
             assert text_seg["clip"]["transform"]["y"] == pytest.approx(-0.75)
 
     def test_drama_mode_includes_subtitle_track(self, tmp_path):
-        """drama 注册为字幕模式：携带 subtitle_spans 时生成字幕轨并按 span 在片段内逐条渲染。"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """drama 注册为字幕模式：携带 subtitle_spans 时生成字幕轨并按 span 在片段内逐条渲染。"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -517,7 +537,6 @@ class TestGenerateDraft:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="剧集字幕草稿",
@@ -539,8 +558,10 @@ class TestGenerateDraft:
         assert starts[1] == 1_000_000
 
     def test_drama_mode_without_utterances_has_empty_subtitle_track(self, tmp_path):
-        """drama 无 utterances（spans 为空）：仍注册字幕轨，但不落字幕片段。"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """drama 无 utterances（spans 为空）：仍注册字幕轨，但不落字幕片段。"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -552,7 +573,6 @@ class TestGenerateDraft:
             {"id": "S1", "local_path": str(videos_dir / "scene_S1.mp4"), "subtitle_text": "", "subtitle_spans": []},
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="空字幕草稿",
@@ -579,32 +599,32 @@ class TestMusicTrackSelection:
 
     @pytest.mark.unit
     def test_prefers_vocal_track_when_singing_exists(self, tmp_path):
-        from server.services.jianying_draft_service import _resolve_music_track
+        from server.services.episode_timeline import resolve_music_track
 
         (tmp_path / "music").mkdir()
         (tmp_path / "music" / "main.wav").write_bytes(b"RIFFcompose")
         (tmp_path / "music" / "vocal_main.wav").write_bytes(b"RIFFsing")
 
-        picked = _resolve_music_track(tmp_path)
+        picked = resolve_music_track(tmp_path)
         assert picked is not None and picked.name == "vocal_main.wav"
 
     @pytest.mark.unit
     def test_falls_back_to_composed_track(self, tmp_path):
         """没跑歌声合成时用作曲产物——ACE-Step 带歌词产出的本就是完整歌曲。"""
-        from server.services.jianying_draft_service import _resolve_music_track
+        from server.services.episode_timeline import resolve_music_track
 
         (tmp_path / "music").mkdir()
         (tmp_path / "music" / "main.wav").write_bytes(b"RIFFcompose")
 
-        picked = _resolve_music_track(tmp_path)
+        picked = resolve_music_track(tmp_path)
         assert picked is not None and picked.name == "main.wav"
 
     @pytest.mark.unit
     def test_no_music_at_all(self, tmp_path):
         """narration / drama / ad 项目本就没有配乐，缺文件是常态不是异常。"""
-        from server.services.jianying_draft_service import _resolve_music_track
+        from server.services.episode_timeline import resolve_music_track
 
-        assert _resolve_music_track(tmp_path) is None
+        assert resolve_music_track(tmp_path) is None
 
     @pytest.mark.unit
     def test_export_uses_the_selector(self):
@@ -614,7 +634,7 @@ class TestMusicTrackSelection:
         from server.services.jianying_draft_service import JianyingDraftService
 
         src = inspect.getsource(JianyingDraftService)
-        assert "_resolve_music_track(project_dir)" in src
+        assert "resolve_music_track(project_dir)" in src
         assert 'resource_relative_path("music", _MAIN_MUSIC_TRACK_ID)' not in src
 
 
@@ -622,8 +642,10 @@ class TestNarrationAudioTrack:
     """测试逐段旁白音轨在剪映草稿中的接入"""
 
     def test_clip_with_narration_audio_adds_audio_segment_at_video_offset(self, tmp_path):
-        """段含旁白音频时，草稿含音频轨，音频段按视频段 offset 摆放"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """段含旁白音频时，草稿含音频轨，音频段按视频段 offset 摆放"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -644,7 +666,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="旁白草稿",
@@ -670,8 +691,10 @@ class TestNarrationAudioTrack:
         assert segments[0]["target_timerange"]["start"] == second_video_start
 
     def test_audio_duration_follows_audio_file_not_video(self, tmp_path):
-        """音频段时长取音频文件真实时长，不与视频段对齐"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """音频段时长取音频文件真实时长，不与视频段对齐"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -690,7 +713,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="时长草稿",
@@ -711,8 +733,10 @@ class TestNarrationAudioTrack:
         assert audio_duration_us > video_duration_us
 
     def test_unparseable_audio_skipped_without_error(self, tmp_path):
-        """音频文件存在但无法解析（如截断/空文件）时跳过该段配音，导出不报错"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """音频文件存在但无法解析（如截断/空文件）时跳过该段配音，导出不报错"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -731,7 +755,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="坏音频草稿",
@@ -746,8 +769,10 @@ class TestNarrationAudioTrack:
         assert all(t.get("type") != "audio" for t in content.get("tracks", []))
 
     def test_audio_open_failure_skipped_without_error(self, tmp_path, monkeypatch):
-        """音频文件解析阶段抛出运行时错误（如被占用）时跳过该段配音，导出不报错"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """音频文件解析阶段抛出运行时错误（如被占用）时跳过该段配音，导出不报错"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -771,7 +796,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="占用草稿",
@@ -785,8 +809,10 @@ class TestNarrationAudioTrack:
         assert content.get("materials", {}).get("audios", []) == []
 
     def test_zero_duration_audio_skipped_without_error(self, tmp_path, monkeypatch):
-        """音频有效时长为 0（解析异常或被收口到 0）时跳过该段配音，导出不报错"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """音频有效时长为 0（解析异常或被收口到 0）时跳过该段配音，导出不报错"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -812,7 +838,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="零时长草稿",
@@ -827,8 +852,10 @@ class TestNarrationAudioTrack:
         assert all(t.get("type") != "audio" for t in content.get("tracks", []))
 
     def test_overlong_audio_clamped_to_next_narration_start(self, tmp_path):
-        """前段音频长过下一段音频的起点时收口到起点，导出不报错"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """前段音频长过下一段音频的起点时收口到起点，导出不报错"""
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -855,7 +882,6 @@ class TestNarrationAudioTrack:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="超长草稿",
@@ -886,6 +912,8 @@ class TestTransitions:
     def _generate_with_transitions(self, tmp_path, transitions: list[str]) -> dict:
         from server.services.jianying_draft_service import JianyingDraftService
 
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
         clips = []
@@ -895,7 +923,6 @@ class TestTransitions:
             clips.append({"id": f"S{i + 1}", "local_path": str(path), "subtitle_text": "", "transition_to_next": t})
 
         draft_dir = tmp_path / "drafts" / "转场草稿"
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="转场草稿",
@@ -930,7 +957,9 @@ class TestTransitions:
         assert content.get("materials", {}).get("transitions", []) == []
 
     def test_collect_video_clips_includes_transition_field(self, tmp_path):
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -948,8 +977,7 @@ class TestTransitions:
                 },
             ],
         }
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir)
+        clips = collect_video_clips(script, project_dir)
         assert clips[0]["transition_to_next"] == "fade"
 
 
@@ -957,8 +985,10 @@ class TestReplacePaths:
     """测试路径后处理（JSON 安全替换）"""
 
     def test_replaces_tmp_prefix_in_json(self, tmp_path):
-        """递归替换 JSON 中的临时路径前缀"""
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
+        """递归替换 JSON 中的临时路径前缀"""
 
         json_path = tmp_path / "draft_content.json"
         data = {
@@ -972,7 +1002,6 @@ class TestReplacePaths:
         }
         json_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._replace_paths_in_draft(
             json_path=json_path,
             tmp_prefix="/tmp/arcreel_jy_abc/草稿/assets",
@@ -1076,20 +1105,22 @@ class TestExportEpisodeDraft:
 
     def test_stage_rejects_source_replaced_outside_project(self, tmp_path, monkeypatch):
         """收集后源路径被替换为项目外目标时，暂存前重校验拒绝导出"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        import server.services.jianying_draft_service as jds
 
         pm, _ = self._setup_project(tmp_path)
         outside = tmp_path / "outside.mp4"
         make_test_video(outside)
-        svc = JianyingDraftService(pm)
-        original = svc._collect_video_clips
+        svc = jds.JianyingDraftService(pm)
+        original = jds.collect_video_clips
 
         def tampered(script_data, project_dir, **kwargs):
             clips = original(script_data, project_dir, **kwargs)
             clips[0]["abs_path"] = outside
             return clips
 
-        monkeypatch.setattr(svc, "_collect_video_clips", tampered)
+        # 打在导出模块的引用上而非 episode_timeline 的定义上：被篡改的是「剪映导出这条链
+        # 拿到的收集结果」，交接包那条链不该受影响
+        monkeypatch.setattr(jds, "collect_video_clips", tampered)
 
         with pytest.raises(ValueError, match="路径越界"):
             svc.export_episode_draft(project_name="demo", episode=1, draft_path="/mock/JianyingDrafts")
@@ -1388,15 +1419,16 @@ class TestAdReferenceUnitClips:
         }
 
     def test_collects_unit_clips_with_per_shot_subtitle_spans(self, tmp_path):
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         ref_dir = project_dir / "reference_videos"
         ref_dir.mkdir(parents=True)
         (ref_dir / "E1U1.mp4").write_bytes(b"fake")
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(self._script(), project_dir, generation_mode="reference_video")
+        clips = collect_video_clips(self._script(), project_dir, generation_mode="reference_video")
 
         assert len(clips) == 1
         clip = clips[0]
@@ -1411,7 +1443,9 @@ class TestAdReferenceUnitClips:
 
     def test_storyboard_path_keeps_shot_clips(self, tmp_path):
         """同一份剧本走 storyboard 路径时仍按 shots 收集，残留索引不参与。"""
-        from server.services.jianying_draft_service import JianyingDraftService
+        from server.services.episode_timeline import (
+            collect_video_clips,
+        )
 
         project_dir = tmp_path / "projects" / "demo"
         videos_dir = project_dir / "videos"
@@ -1420,13 +1454,14 @@ class TestAdReferenceUnitClips:
         script = self._script()
         script["shots"][0]["generated_assets"] = {"video_clip": "videos/shot_E1S1.mp4", "status": "completed"}
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
-        clips = svc._collect_video_clips(script, project_dir, generation_mode="storyboard")
+        clips = collect_video_clips(script, project_dir, generation_mode="storyboard")
 
         assert [c["id"] for c in clips] == ["E1S1"]
 
     def test_generate_draft_renders_span_subtitles_within_unit(self, tmp_path):
         from server.services.jianying_draft_service import JianyingDraftService
+
+        svc = JianyingDraftService.__new__(JianyingDraftService)
 
         videos_dir = tmp_path / "videos"
         videos_dir.mkdir()
@@ -1445,7 +1480,6 @@ class TestAdReferenceUnitClips:
             },
         ]
 
-        svc = JianyingDraftService.__new__(JianyingDraftService)
         svc._generate_draft(
             draft_dir=draft_dir,
             draft_name="参考直出草稿",

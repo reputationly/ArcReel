@@ -57,6 +57,7 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
   const [exportingProject, setExportingProject] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [jianyingExporting, setJianyingExporting] = useState(false);
+  const [chatcutExporting, setChatcutExporting] = useState(false);
   const [exportDiagnostics, setExportDiagnostics] = useState<ExportDiagnostics | null>(null);
   const usageAnchorRef = useRef<HTMLDivElement>(null);
   const notificationAnchorRef = useRef<HTMLDivElement>(null);
@@ -157,6 +158,26 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
         );
     } finally {
       setJianyingExporting(false);
+    }
+  };
+
+  const handleChatcutExport = async (episode: number) => {
+    if (!currentProjectName || chatcutExporting) return;
+
+    setChatcutExporting(true);
+    try {
+      const { download_token } = await API.requestExportToken(currentProjectName, "current");
+      triggerBrowserDownload(
+        API.getChatcutHandoffDownloadUrl(currentProjectName, episode, download_token),
+      );
+      setExportDialogOpen(false);
+      useAppStore.getState().pushToast(t("dashboard:chatcut_export_started"), "success");
+    } catch (err) {
+      useAppStore
+        .getState()
+        .pushNotification(t("dashboard:chatcut_export_failed", { message: errMsg(err) }), "error");
+    } finally {
+      setChatcutExporting(false);
     }
   };
 
@@ -422,12 +443,16 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
               open={exportDialogOpen}
               onClose={() => setExportDialogOpen(false)}
               onSelect={(scope) => {
-                if (scope !== "jianying-draft") void handleExportProject(scope);
+                // 肯定式判定：剪辑器交接各走各的 handler，新增导出类型不会因为漏进否定条件
+                // 而被误当成项目归档包导出
+                if (scope === "current" || scope === "full") void handleExportProject(scope);
               }}
               anchorRef={exportAnchorRef}
               episodes={currentProjectData?.episodes ?? []}
               onJianyingExport={voidPromise(handleJianyingExport)}
               jianyingExporting={jianyingExporting}
+              onChatcutExport={voidPromise(handleChatcutExport)}
+              chatcutExporting={chatcutExporting}
             />
           </div>
 

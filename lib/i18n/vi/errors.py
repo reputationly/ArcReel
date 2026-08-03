@@ -13,6 +13,7 @@ MESSAGES = {
     "jianying_path_too_long": "Đường dẫn thư mục bản nháp quá dài",
     "jianying_path_illegal": "Đường dẫn thư mục bản nháp chứa ký tự không hợp lệ",
     "jianying_export_failed": "Xuất bản nháp Jianying thất bại, vui lòng thử lại sau",
+    "chatcut_handoff_export_failed": "Xuất gói bàn giao ChatCut thất bại, vui lòng thử lại sau",
     "title_required": "Tên dự án không được để trống",
     "project_exists": "Dự án '{name}' đã tồn tại",
     "script_not_found": "Kịch bản '{name}' không tồn tại",
